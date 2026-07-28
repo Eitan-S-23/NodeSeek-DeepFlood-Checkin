@@ -10,22 +10,62 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 import random
+import re
 import time
 import traceback
 import undetected_chromedriver as uc
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.action_chains import ActionChains
 
-ns_random = os.environ.get("NS_RANDOM","false")
+import notify
+
+# 本地调试时从 .env 读取配置；GitHub Actions 环境直接使用注入的环境变量。
+# python-dotenv 缺失时静默跳过，保证已有部署无需改动即可运行。
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ImportError:
+    pass
+
+def env_bool(name, default=False):
+    """
+    解析布尔型环境变量，接受 true/1/yes/on/y（大小写不敏感）为真，其余为假。
+    未设置或为空时返回 default。
+    """
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in ("true", "1", "yes", "on", "y")
+
+
+ns_random = env_bool("NS_RANDOM")
 cookie = os.environ.get("NS_COOKIE") or os.environ.get("COOKIE")
 # 通过环境变量控制是否使用无头模式，默认为 True（无头模式）
-headless = os.environ.get("HEADLESS", "true").lower() == "true"
+headless = env_bool("HEADLESS", default=True)
+# 除签到外的任务（评论、加鸡腿）总开关，默认关闭。
+# 这些操作有被举报禁言的风险，需显式设置 NS_EXTRA_TASKS=true 才执行。
+extra_tasks_enabled = env_bool("NS_EXTRA_TASKS")
 
 randomInputStr = ["bd","绑定","帮顶"]
+
+def extract_sign_reward(driver):
+    """
+    从签到页面文本中提取鸡腿收益描述，用于通知正文。
+    页面文案可能随站点调整，提取失败时返回空字符串，不影响主流程。
+    """
+    try:
+        page_text = BeautifulSoup(driver.page_source, 'html.parser').get_text(' ', strip=True)
+        match = re.search(r'[^。；;\s]{0,20}?\d+\s*个?鸡腿[^。；;]{0,20}', page_text)
+        return match.group(0).strip() if match else ""
+    except Exception as e:
+        print(f"提取签到收益失败: {str(e)}")
+        return ""
 
 def click_sign_icon(driver):
     """
     尝试点击签到图标和试试手气按钮的通用方法
+    返回: {"success": bool, "detail": str}，detail 为通知用的中文结果描述
     """
     try:
         print("开始查找签到图标...")
@@ -73,11 +113,15 @@ def click_sign_icon(driver):
             
             click_button.click()
             print("完成试试手气点击")
+            time.sleep(2)
+            reward = extract_sign_reward(driver)
+            detail = f"签到成功，{reward}" if reward else "签到成功"
         except Exception as lucky_error:
             print(f"试试手气按钮点击失败或者签到过了: {str(lucky_error)}")
-            
-        return True
-        
+            detail = "今日已签到（未找到领取按钮）"
+
+        return {"success": True, "detail": detail}
+
     except Exception as e:
         print(f"签到过程中出错:")
         print(f"错误类型: {type(e).__name__}")
@@ -86,7 +130,7 @@ def click_sign_icon(driver):
         print(f"当前页面源码片段: {driver.page_source[:500]}...")
         print("详细错误信息:")
         traceback.print_exc()
-        return False
+        return {"success": False, "detail": f"签到失败: {type(e).__name__} {str(e)}"}
 
 def setup_driver_and_cookies():
     """
@@ -158,6 +202,11 @@ def setup_driver_and_cookies():
         return None
 
 def nodeseek_comment(driver):
+    """
+    在交易区随机帖子下评论并尝试加鸡腿
+    返回: {"total": int, "commented": int, "chicken_leg": bool, "error": str}
+    """
+    stats = {"total": 0, "commented": 0, "chicken_leg": False, "error": ""}
     try:
         print("正在访问交易区...")
         target_url = 'https://www.nodeseek.com/categories/trade'
@@ -184,7 +233,8 @@ def nodeseek_comment(driver):
                 continue
         
         is_chicken_leg = False
-        
+        stats["total"] = len(selected_urls)
+
         # 使用URL列表进行操作
         for i, post_url in enumerate(selected_urls):
             try:
@@ -225,8 +275,9 @@ def nodeseek_comment(driver):
                 time.sleep(0.5)
                 submit_button.click()
                 
+                stats["commented"] += 1
                 print(f"已在帖子 {post_url} 中完成评论")
-                
+
                 # 返回交易区
                 # driver.get(target_url)
                 # time.sleep(2)  # 等待页面加载
@@ -236,12 +287,38 @@ def nodeseek_comment(driver):
                 print(f"处理帖子时出错: {str(e)}")
                 continue
                 
+        stats["chicken_leg"] = is_chicken_leg
         print("NodeSeek评论任务完成")
-                
+
     except Exception as e:
+        stats["error"] = f"{type(e).__name__} {str(e)}"
         print(f"NodeSeek评论出错: {str(e)}")
         print("详细错误信息:")
         print(traceback.format_exc())
+
+    return stats
+
+
+def build_notify_content(sign_result, comment_stats):
+    """把签到与评论结果拼成通知正文（纯文本，各渠道通用）。"""
+    lines = [
+        f"执行时间: {time.strftime('%Y-%m-%d %H:%M:%S')}",
+        f"签到结果: {sign_result['detail']}",
+    ]
+
+    # 附加任务被开关关闭时只说明状态，不输出无意义的 0/0 统计
+    if comment_stats is None:
+        lines.append("附加任务: 已关闭（NS_EXTRA_TASKS 未开启）")
+        return "\n".join(lines)
+
+    if comment_stats["error"]:
+        lines.append(f"评论任务: 异常终止（{comment_stats['error']}）")
+    else:
+        lines.append(
+            f"评论任务: 成功 {comment_stats['commented']}/{comment_stats['total']} 个帖子"
+        )
+    lines.append(f"加鸡腿: {'成功' if comment_stats['chicken_leg'] else '未成功'}")
+    return "\n".join(lines)
 
 def click_chicken_leg(driver):
     try:
@@ -286,15 +363,35 @@ def click_chicken_leg(driver):
         print(f"加鸡腿操作失败: {str(e)}")
         return False
 
-if __name__ == "__main__":
-    print("开始执行NodeSeek评论脚本...")
+def run():
+    """
+    执行每日任务并推送通知。
+    返回进程退出码：0 表示签到成功，1 表示浏览器初始化失败或签到失败。
+    """
+    print("开始执行NodeSeek每日任务...")
     driver = setup_driver_and_cookies()
     if not driver:
         print("浏览器初始化失败")
-        exit(1)
-    nodeseek_comment(driver)
-    click_sign_icon(driver)
+        # 初始化失败同样推送通知，避免任务静默中断
+        notify.send("NodeSeek 每日任务失败", "浏览器初始化失败，请检查 NS_COOKIE 配置与运行环境")
+        return 1
+
+    # 评论与加鸡腿受 NS_EXTRA_TASKS 控制，关闭时只执行签到
+    if extra_tasks_enabled:
+        print("NS_EXTRA_TASKS 已开启，执行评论与加鸡腿任务")
+        comment_stats = nodeseek_comment(driver)
+    else:
+        print("NS_EXTRA_TASKS 未开启，跳过评论与加鸡腿任务，仅执行签到")
+        comment_stats = None
+
+    sign_result = click_sign_icon(driver)
     print("脚本执行完成")
-    # while True:
-    #     time.sleep(1)
+
+    title = "NodeSeek 每日任务" + ("" if sign_result["success"] else "（签到异常）")
+    notify.send(title, build_notify_content(sign_result, comment_stats))
+    return 0 if sign_result["success"] else 1
+
+
+if __name__ == "__main__":
+    exit(run())
 

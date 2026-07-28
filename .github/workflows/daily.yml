@@ -4,8 +4,10 @@ on:
   push:
     branches:
       - main
+  # 支持在 Actions 页面手动触发，便于验证配置是否生效
+  workflow_dispatch:
   schedule:
-    - cron: '00 16 * * *'  # UTC 16:00，即北京时间 00:00
+    - cron: '00 0 * * *'  # UTC 00:00，即北京时间 08:00
 
 jobs:
   run-nodeseek-daily:
@@ -37,7 +39,21 @@ jobs:
       - name: Run NodeSeek script
         env:
           NS_COOKIE: ${{ secrets.NS_COOKIE }}
-          NS_RANDOM: ${{ secrets.NS_RANDOM }}
+          NS_RANDOM: ${{ vars.NS_RANDOM || secrets.NS_RANDOM }}
           HEADLESS: "true"
+          # 除签到外的任务（评论、加鸡腿）总开关，未配置时默认关闭
+          NS_EXTRA_TASKS: ${{ vars.NS_EXTRA_TASKS || secrets.NS_EXTRA_TASKS }}
+          # Telegram 通知（可选）
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_USER_ID: ${{ secrets.TG_USER_ID }}
+          TG_API_HOST: ${{ secrets.TG_API_HOST }}
+          TG_PROXY: ${{ secrets.TG_PROXY }}
+          # 企业微信群机器人通知（可选）
+          WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
+          # 企业微信自建应用通知（可选）
+          WECOM_CORPID: ${{ secrets.WECOM_CORPID }}
+          WECOM_CORPSECRET: ${{ secrets.WECOM_CORPSECRET }}
+          WECOM_AGENTID: ${{ secrets.WECOM_AGENTID }}
+          WECOM_TOUSER: ${{ secrets.WECOM_TOUSER }}
         run: |
           python nodeseek_daily.py

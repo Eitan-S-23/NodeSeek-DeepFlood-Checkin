@@ -3,4 +3,5 @@ requests>=2.31.0
 curl_cffi>=0.6.2
 beautifulsoup4>=4.12.3
 undetected-chromedriver>=3.5.5
-webdriver_manager>=4.0.1 
+webdriver_manager>=4.0.1
+python-dotenv==1.0.1
