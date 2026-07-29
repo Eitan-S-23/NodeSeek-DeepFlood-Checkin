@@ -164,7 +164,9 @@ CF_CHALLENGE_MARKERS = ("just a moment", "challenges.cloudflare.com", "cf-browse
 SIGN_PAGE_URL = 'https://www.nodeseek.com/board'
 
 # 页面已签到的文案特征。命中任一说明今日已领取，属于正常结果而非失败。
-SIGNED_MARKERS = ("今日已签到", "已经签到", "已签到", "明天再来", "请明天")
+# 注意签到后页面实际显示"今日签到获得鸡腿x个"，靠"今日签到"+"获得...鸡腿"
+# 这类收益句判断；纯"已签到"等字眼是早期猜测，保留作兼容。
+SIGNED_MARKERS = ("今日签到", "今日已签到", "已经签到", "明天再来", "请明天", "已签到")
 
 
 def is_cloudflare_challenge(driver):
@@ -205,11 +207,16 @@ def wait_for_cloudflare(driver, timeout=60):
 def extract_sign_reward(driver):
     """
     从签到页面文本中提取鸡腿收益描述，用于通知正文。
+
+    签到成功与已签到都会显示收益，文案可能为"获得 5 个鸡腿""鸡腿10个"等，
+    数字可能在鸡腿前也可能在后，这里两种都匹配。
     页面文案可能随站点调整，提取失败时返回空字符串，不影响主流程。
     """
     try:
         page_text = BeautifulSoup(driver.page_source, 'html.parser').get_text(' ', strip=True)
-        match = re.search(r'[^。；;\s]{0,20}?\d+\s*个?鸡腿[^。；;]{0,20}', page_text)
+        # 数字在前：5个鸡腿 / 5 鸡腿；数字在后：鸡腿10个 / 鸡腿 10 个
+        match = re.search(r'[^。；;\s]{0,20}?\d+\s*个?鸡腿[^。；;]{0,20}', page_text) \
+            or re.search(r'[^。；;\s]{0,20}?鸡腿\s*\d+\s*个?[^。；;]{0,20}', page_text)
         return match.group(0).strip() if match else ""
     except Exception as e:
         print(f"提取签到收益失败: {str(e)}")
