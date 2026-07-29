@@ -95,9 +95,9 @@ class ChromeVersionTestCase(unittest.TestCase):
             self.assertIsNone(daily.detect_chrome_major_version())
 
 
-def _site_result(site, sign, comment_stats, summary):
+def _site_result(site, sign, comment_stats, summary, started_at="2026-07-30 08:00:00"):
     """构造 build_notify_content 需要的单站结果元组。"""
-    return (site, sign, comment_stats, summary)
+    return (site, sign, comment_stats, summary, started_at)
 
 
 class BuildNotifyContentTestCase(unittest.TestCase):

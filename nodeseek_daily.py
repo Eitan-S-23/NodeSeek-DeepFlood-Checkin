@@ -690,13 +690,14 @@ def build_notify_content(site_results):
     """
     把各站点签到结果拼成通知正文（纯文本，各渠道通用）。
 
-    site_results: [(site, sign_result, comment_stats, account_summary), ...]
+    site_results: [(site, sign_result, comment_stats, account_summary, started_at), ...]
     单站点时仍按原排版输出，多站点时每站一段、用分隔线隔开。
+    每站段首带本站签到开始时间，多站时可直观看出两站间隔与延迟。
     """
     lines = [f"执行时间: {time.strftime('%Y-%m-%d %H:%M:%S')}"]
 
-    def render_site(site, sign_result, comment_stats, account_summary, header):
-        block = [header, f"签到结果: {sign_result['detail']}"]
+    def render_site(site, sign_result, comment_stats, account_summary, started_at, header):
+        block = [header, f"执行时间: {started_at}", f"签到结果: {sign_result['detail']}"]
 
         if account_summary:
             if account_summary.get('level'):
@@ -722,10 +723,10 @@ def build_notify_content(site_results):
         block.append(f"加鸡腿: {'成功' if comment_stats['chicken_leg'] else '未成功'}")
         return block
 
-    for index, (site, sign_result, comment_stats, account_summary) in enumerate(site_results):
+    for index, (site, sign_result, comment_stats, account_summary, started_at) in enumerate(site_results):
         if index > 0:
             lines.append("")  # 站点间空行分隔
-        lines.extend(render_site(site, sign_result, comment_stats, account_summary, f"【{site.name}】"))
+        lines.extend(render_site(site, sign_result, comment_stats, account_summary, started_at, f"【{site.name}】"))
 
     return "\n".join(lines)
 
@@ -800,10 +801,12 @@ def run():
             print(f"[{site.name}] 等待 {gap} 秒后再开始，避免连续签到被风控")
             time.sleep(gap)
 
+        # 记录本站开始签到的时间，写入通知，便于核对两站执行时点与延迟
+        started_at = time.strftime('%Y-%m-%d %H:%M:%S')
         print(f"=== 处理 {site.name}（{site.domain}）===")
         if not inject_site_cookies(driver, site):
             # cookie 注入失败也要纳入结果，让通知体现这一站异常
-            site_results.append((site, {"success": False, "detail": "cookie 注入失败"}, None, {}))
+            site_results.append((site, {"success": False, "detail": "cookie 注入失败"}, None, {}, started_at))
             continue
 
         # 评论与加鸡腿受 NS_EXTRA_TASKS 控制，关闭时只执行签到
@@ -820,7 +823,7 @@ def run():
         print(f"[{site.name}] 抓取账号概览...")
         account_summary = fetch_account_summary(driver, site)
 
-        site_results.append((site, sign_result, comment_stats, account_summary))
+        site_results.append((site, sign_result, comment_stats, account_summary, started_at))
 
     try:
         driver.quit()
