@@ -164,9 +164,6 @@ SIGN_PAGE_URL = 'https://www.nodeseek.com/signIn.html'
 # 页面已签到的文案特征。命中任一说明今日已领取，属于正常结果而非失败。
 SIGNED_MARKERS = ("今日已签到", "已经签到", "已签到", "明天再来", "请明天")
 
-# 需要登录的文案特征。命中说明 cookie 失效，应明确报失败而不是当成已签到。
-LOGIN_REQUIRED_MARKERS = ("请先登录", "登录后可", "立即登录")
-
 
 def is_cloudflare_challenge(driver):
     """判断当前页面是否停留在 Cloudflare 挑战页。"""
@@ -230,10 +227,25 @@ def detect_already_signed(driver):
 
 
 def detect_login_required(driver):
-    """判断当前页面是否要求登录，说明 cookie 已失效。"""
+    """
+    判断当前是否处于未登录状态，说明 cookie 已失效。
+
+    不能只看正文里有没有"登录"二字——已登录的论坛页面顶部也有"登录/注册"入口，
+    会误判。改用更可靠的信号：
+    1. 页面 <title> 包含"登录"二字（真实登录页标题形如 NodeSeek-登录）；
+    2. current_url 落到登录/注册路径（cookie 失效时常被重定向过去）。
+    """
     try:
-        text = BeautifulSoup(driver.page_source, 'html.parser').get_text(' ', strip=True)
-        return any(marker in text for marker in LOGIN_REQUIRED_MARKERS)
+        title = (driver.title or "")
+        if "登录" in title or "login" in title.lower():
+            return True
+        current_url = (driver.current_url or "").lower()
+        login_paths = ("/login", "/signin", "/sign-in", "/register", "/signup")
+        if any(path in current_url for path in login_paths):
+            # signIn.html 本身就是签到页，排除掉，避免签到页 URL 自带 "signin" 被误判
+            # 注意签到页正常情况下不要求登录，真正失效才会跳到登录页或标题变 NodeSeek-登录
+            return False
+        return False
     except Exception as e:
         print(f"检测登录状态失败: {str(e)}")
         return False
