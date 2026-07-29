@@ -621,6 +621,18 @@ def run():
     return 0 if sign_result["success"] else 1
 
 
+def main():
+    """顶层入口，捕获所有未预期异常，确保通知一定能发出。"""
+    try:
+        return run()
+    except Exception:
+        # run 内部已对已知失败路径做了处理，这里只兜底真正未捕获的异常
+        print("脚本发生未预期异常:")
+        traceback.print_exc()
+        notify.send("NodeSeek 每日任务异常", "脚本执行中断，请查看日志排查")
+        return 1
+
+
 if __name__ == "__main__":
-    exit(run())
+    exit(main())
 
