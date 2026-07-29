@@ -686,15 +686,17 @@ def nodeseek_comment(driver, site):
     return stats
 
 
-def build_notify_content(site_results):
+def build_notify_content(site_results, task_started_at=None):
     """
     把各站点签到结果拼成通知正文（纯文本，各渠道通用）。
 
     site_results: [(site, sign_result, comment_stats, account_summary, started_at), ...]
     单站点时仍按原排版输出，多站点时每站一段、用分隔线隔开。
-    每站段首带本站签到开始时间，多站时可直观看出两站间隔与延迟。
+    顶部为任务启动时间（早于各站签到时间），每站段首带本站签到开始时间，
+    多站时可直观看出两站间隔与延迟。
     """
-    lines = [f"执行时间: {time.strftime('%Y-%m-%d %H:%M:%S')}"]
+    # 顶部时间默认回退到当前时刻，保持单测和旧调用兼容
+    lines = [f"执行时间: {task_started_at or time.strftime('%Y-%m-%d %H:%M:%S')}"]
 
     def render_site(site, sign_result, comment_stats, account_summary, started_at, header):
         block = [header, f"执行时间: {started_at}", f"签到结果: {sign_result['detail']}"]
@@ -781,6 +783,8 @@ def run():
     返回进程退出码：全部签到成功为 0，否则为 1。
     """
     print("开始执行每日任务...")
+    # 记录任务启动时刻，作为通知顶部时间，早于各站签到时间，符合直觉的时间轴顺序
+    task_started_at = time.strftime('%Y-%m-%d %H:%M:%S')
     sites = load_sites()
     if not sites:
         notify.send("每日任务失败", "未配置任何站点 cookie（至少需要 NS_COOKIE）")
@@ -834,7 +838,7 @@ def run():
 
     all_success = all(r[1]["success"] for r in site_results)
     title = "NodeSeek 每日任务" + ("" if all_success else "（签到异常）")
-    notify.send(title, build_notify_content(site_results))
+    notify.send(title, build_notify_content(site_results, task_started_at))
     return 0 if all_success else 1
 
 
