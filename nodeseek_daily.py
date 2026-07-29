@@ -273,6 +273,12 @@ def click_sign_icon(driver):
 
         time.sleep(2)
         print(f"当前页面URL: {driver.current_url}", flush=True)
+        # 打印签到页真实 title 与源码头部，定位 detect_login_required 为何命中
+        try:
+            print(f"[诊断] 签到页 title: {driver.title}", flush=True)
+            print(f"[诊断] 签到页源码头部: {driver.page_source[:800]}", flush=True)
+        except Exception as diag_error:
+            print(f"[诊断] 读取签到页失败: {str(diag_error)}", flush=True)
 
         print("检测登录状态...", flush=True)
         if detect_login_required(driver):
