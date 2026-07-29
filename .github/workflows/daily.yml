@@ -49,7 +49,9 @@ jobs:
           # 除签到外的任务（评论、加鸡腿）总开关，未配置时默认关闭
           NS_EXTRA_TASKS: ${{ vars.NS_EXTRA_TASKS || secrets.NS_EXTRA_TASKS }}
           # deepflood 子站 cookie（可选，配置后两站顺序签到，中间自动随机延迟）
-          DEEPFLOOD_COOKIE: ${{ secrets.DEPFLOOD_COOKIE }}
+          # 注意 secret 名是 DEEPFLOOD_COOKIE（DEEP），须与拼写完全一致，
+          # 之前曾误写为 DEPFLOOD_COOKIE 导致取不到值。
+          DEEPFLOOD_COOKIE: ${{ secrets.DEEPFLOOD_COOKIE }}
           # 两站签到间随机延迟范围（秒，默认 60-180），可调以降低被风控概率
           SITE_GAP_MIN: ${{ vars.SITE_GAP_MIN }}
           SITE_GAP_MAX: ${{ vars.SITE_GAP_MAX }}
