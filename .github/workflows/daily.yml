@@ -22,12 +22,15 @@ jobs:
         with:
           python-version: '3.11.8'
 
-      - name: Install Chrome and Xvfb
+      # runner 镜像（Ubuntu 24.04）已预装 Google Chrome 与匹配的 ChromeDriver，
+      # 不要再 apt 安装 chromium-browser：该包在 24.04 上只是转发到 snap 的过渡包，
+      # 装完得不到可用浏览器。这里只补装 xvfb 用于提供虚拟显示。
+      - name: Install Xvfb
         run: |
           sudo apt-get update
-          sudo apt-get install -y chromium-browser chromium-chromedriver xvfb
+          sudo apt-get install -y xvfb
           echo "Chrome version:"
-          chromium-browser --version
+          google-chrome --version
           echo "ChromeDriver version:"
           chromedriver --version
 

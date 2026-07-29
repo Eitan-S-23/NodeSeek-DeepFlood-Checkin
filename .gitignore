@@ -1,3 +1,7 @@
 /.DS_Store
 /.venv
 /__pycache__
+
+# 本地凭据文件，含真实 session，禁止提交
+/cookie.txt
+/.env.local

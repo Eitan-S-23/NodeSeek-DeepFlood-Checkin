@@ -155,5 +155,21 @@ class RunTestCase(unittest.TestCase):
         self.assertIn("签到异常", send.call_args.args[0])
 
 
+class ShouldSkipCookieTestCase(unittest.TestCase):
+    """校验 cookie 过滤：环境绑定与统计类 cookie 必须跳过，登录态必须保留。"""
+
+    def test_跳过_cloudflare_与统计类_cookie(self):
+        for name in ("cf_clearance", "__cf_bm", "__cflb", "_ga", "_ga_47LDR1H8FC", "_gid", "_gat"):
+            self.assertTrue(daily.should_skip_cookie(name), f"{name} 应跳过")
+
+    def test_保留登录态相关_cookie(self):
+        for name in ("session", "pjwt", "smac", "fog", "colorscheme"):
+            self.assertFalse(daily.should_skip_cookie(name), f"{name} 应注入")
+
+    def test_大小写与空白不影响判定(self):
+        self.assertTrue(daily.should_skip_cookie("  CF_Clearance  "))
+        self.assertFalse(daily.should_skip_cookie("  Session  "))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

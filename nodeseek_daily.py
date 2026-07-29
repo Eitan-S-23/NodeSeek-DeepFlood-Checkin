@@ -39,6 +39,19 @@ def env_bool(name, default=False):
     return raw.strip().lower() in ("true", "1", "yes", "on", "y")
 
 
+# 不应注入的 cookie。
+# Cloudflare 的 cf_clearance / __cf_bm 与获取时的出口 IP 和 User-Agent 绑定，
+# 在 GitHub Actions 这类异地环境注入对不上的值，比不带更容易被判定为异常；
+# _ga 等统计 cookie 与登录态无关。前缀匹配以覆盖 _ga_XXXX 这类带后缀的变体。
+SKIP_COOKIE_PREFIXES = ("cf_clearance", "__cf_bm", "__cflb", "_ga", "_gid", "_gat")
+
+
+def should_skip_cookie(name):
+    """判断某个 cookie 是否应跳过注入（大小写不敏感的前缀匹配）。"""
+    lowered = name.strip().lower()
+    return any(lowered.startswith(prefix) for prefix in SKIP_COOKIE_PREFIXES)
+
+
 ns_random = env_bool("NS_RANDOM")
 cookie = os.environ.get("NS_COOKIE") or os.environ.get("COOKIE")
 # 通过环境变量控制是否使用无头模式，默认为 True（无头模式）
@@ -139,8 +152,8 @@ def setup_driver_and_cookies():
     """
     try:
         cookie = os.environ.get("NS_COOKIE") or os.environ.get("COOKIE")
-        headless = os.environ.get("HEADLESS", "true").lower() == "true"
-        
+        headless = env_bool("HEADLESS", default=True)
+
         if not cookie:
             print("未找到cookie配置")
             return None
@@ -152,13 +165,13 @@ def setup_driver_and_cookies():
         
         if headless:
             print("启用无头模式...")
-            options.add_argument('--headless')
-            # 添加以下参数来绕过 Cloudflare 检测
+            options.add_argument('--headless=new')
+            # 降低自动化特征
             options.add_argument('--disable-blink-features=AutomationControlled')
             options.add_argument('--disable-gpu')
             options.add_argument('--window-size=1920,1080')
-            # 设置 User-Agent
-            options.add_argument('--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+            # 不覆盖 User-Agent：伪造的 UA 若与真实平台和 Chrome 版本不一致，
+            # 反而会成为 Cloudflare 的识别特征。让 undetected-chromedriver 使用真实 UA。
         
         print("正在启动Chrome...")
         driver = uc.Chrome(options=options)
@@ -176,23 +189,40 @@ def setup_driver_and_cookies():
         # 等待页面加载完成
         time.sleep(5)
         
+        injected = 0
         for cookie_item in cookie.split(';'):
             try:
                 name, value = cookie_item.strip().split('=', 1)
+                name = name.strip()
+                if not name:
+                    continue
+
+                if should_skip_cookie(name):
+                    print(f"跳过 cookie: {name}（与本机环境绑定或与登录态无关）")
+                    continue
+
                 driver.add_cookie({
-                    'name': name, 
-                    'value': value, 
+                    'name': name,
+                    'value': value.strip(),
                     'domain': '.nodeseek.com',
                     'path': '/'
                 })
+                injected += 1
             except Exception as e:
                 print(f"设置cookie出错: {str(e)}")
                 continue
-        
+
+        print(f"共注入 {injected} 个 cookie")
+        if injected == 0:
+            # 一个都没注入必然无法登录，提前失败比后续在签到步骤报错更容易定位
+            print("没有任何有效 cookie 被注入，请检查 NS_COOKIE 格式（应形如 session=xxx）")
+            driver.quit()
+            return None
+
         print("刷新页面...")
         driver.refresh()
         time.sleep(5)  # 增加等待时间
-        
+
         return driver
         
     except Exception as e:
