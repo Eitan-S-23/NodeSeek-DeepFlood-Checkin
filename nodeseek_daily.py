@@ -219,9 +219,25 @@ def load_sites():
     return sites
 
 
+def _env_int(name, default):
+    """读取整数型环境变量，空串与未设置同样视为缺失，回退到 default。"""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw.strip())
+    except ValueError:
+        print(f"环境变量 {name} 不是合法整数: {raw!r}，使用默认 {default}")
+        return default
+
+
 # 两站签到之间的随机延迟范围（秒），降低被风控判为批量行为的概率
-SITE_GAP_MIN = int(os.environ.get("SITE_GAP_MIN", "60"))
-SITE_GAP_MAX = int(os.environ.get("SITE_GAP_MAX", "180"))
+SITE_GAP_MIN = _env_int("SITE_GAP_MIN", 60)
+SITE_GAP_MAX = _env_int("SITE_GAP_MAX", 180)
+if SITE_GAP_MIN > SITE_GAP_MAX:
+    # 配置颠倒时纠正，避免 random.randint 抛 ValueError
+    print(f"SITE_GAP_MIN({SITE_GAP_MIN}) > SITE_GAP_MAX({SITE_GAP_MAX})，已互换")
+    SITE_GAP_MIN, SITE_GAP_MAX = SITE_GAP_MAX, SITE_GAP_MIN
 
 
 # 页面已签到的文案特征。命中任一说明今日已领取，属于正常结果而非失败。
