@@ -400,11 +400,13 @@ def setup_driver_and_cookies():
         driver.get('https://www.nodeseek.com')
 
         # 首次访问可能落在 Cloudflare 挑战页，需等其自动放行后再注入 cookie
+        print("[诊断] 注入前 title:", driver.title, flush=True)
         wait_for_cloudflare(driver)
+        print("[诊断] 过盾后 title:", driver.title, flush=True)
 
         pairs, skipped = parse_cookie_string(cookie)
         for reason in skipped:
-            print(f"跳过 cookie: {reason}")
+            print(f"跳过 cookie: {reason}", flush=True)
 
         injected = 0
         for name, value in pairs:
@@ -432,13 +434,32 @@ def setup_driver_and_cookies():
             # session 是登录态所在，缺失时后续必然停在未登录页面，提前点明原因
             print("警告: 未注入名为 session 的 cookie，登录态很可能不完整")
 
-        print("刷新页面...")
+        print("刷新页面...", flush=True)
         driver.refresh()
         time.sleep(5)  # 增加等待时间
 
         # 带上登录态后可能再次遇到挑战，这里等待通过后再交给后续任务
         if not wait_for_cloudflare(driver):
-            print("Cloudflare 挑战未通过，后续操作很可能失败")
+            print("Cloudflare 挑战未通过，后续操作很可能失败", flush=True)
+
+        # 注入 cookie 并刷新后，访问鉴权页确认登录态是否真正建立
+        print("[诊断] 刷新后首页 title:", driver.title, flush=True)
+        try:
+            # 个人主页需要登录才能正常显示，访问它可验证登录态
+            driver.get('https://www.nodeseek.com/me')
+            time.sleep(3)
+            me_title = driver.title or ""
+            me_url = driver.current_url or ""
+            print(f"[诊断] /me 页 title: {me_title}", flush=True)
+            print(f"[诊断] /me 页 URL: {me_url}", flush=True)
+            # 打印页面可见文本前 300 字，判断是登录态个人页还是被重定向到登录
+            me_text = BeautifulSoup(driver.page_source, 'html.parser').get_text(' ', strip=True)
+            print(f"[诊断] /me 页文本片段: {me_text[:300]}", flush=True)
+            # 浏览器实际持有的 cookie 名称，确认我们注入的全部落地
+            present = [c.get('name') for c in driver.get_cookies()]
+            print(f"[诊断] 浏览器持有 cookie: {present}", flush=True)
+        except Exception as diag_error:
+            print(f"[诊断] 验证登录态失败: {str(diag_error)}", flush=True)
 
         return driver
         
