@@ -158,8 +158,10 @@ randomInputStr = ["bd","绑定","帮顶"]
 # 命中任一即说明当前页面不是论坛正文，此时任何元素定位都必然超时。
 CF_CHALLENGE_MARKERS = ("just a moment", "challenges.cloudflare.com", "cf-browser-verification")
 
-# 签到页地址。直接导航到此页，避免点击头部签到图标时被 #nsk-head 容器遮挡。
-SIGN_PAGE_URL = 'https://www.nodeseek.com/signIn.html'
+# 签到页地址。
+# 注意 signIn.html 是登录/注册页，不是签到页——二者字面相近容易混淆，
+# 直连 signIn 会被站点判定为需要登录。签到入口实际在 /board。
+SIGN_PAGE_URL = 'https://www.nodeseek.com/board'
 
 # 页面已签到的文案特征。命中任一说明今日已领取，属于正常结果而非失败。
 SIGNED_MARKERS = ("今日已签到", "已经签到", "已签到", "明天再来", "请明天")
@@ -239,13 +241,11 @@ def detect_login_required(driver):
         title = (driver.title or "")
         if "登录" in title or "login" in title.lower():
             return True
+        # 站点登录页路径形如 signIn.html / login，签到页是 /board 不在此列。
+        # 只匹配登录/注册路径，避免把签到页 URL 误判为需要登录。
         current_url = (driver.current_url or "").lower()
-        login_paths = ("/login", "/signin", "/sign-in", "/register", "/signup")
-        if any(path in current_url for path in login_paths):
-            # signIn.html 本身就是签到页，排除掉，避免签到页 URL 自带 "signin" 被误判
-            # 注意签到页正常情况下不要求登录，真正失效才会跳到登录页或标题变 NodeSeek-登录
-            return False
-        return False
+        login_paths = ("/login", "/signin.html", "/sign-in", "/register", "/signup")
+        return any(path in current_url for path in login_paths)
     except Exception as e:
         print(f"检测登录状态失败: {str(e)}")
         return False
@@ -253,10 +253,7 @@ def detect_login_required(driver):
 
 def click_sign_icon(driver):
     """
-    执行签到：直接打开签到页并领取奖励。
-
-    不再点击头部的签到图标——该图标会被 #nsk-head 容器遮挡导致
-    element click intercepted，直接导航到签到页可绕开遮挡。
+    执行签到：直接打开签到页 /board 并领取奖励。
 
     返回: {"success": bool, "detail": str}，detail 为通知用的中文结果描述。
     只有确认领取成功或页面明确显示已签到才算成功；
@@ -273,12 +270,6 @@ def click_sign_icon(driver):
 
         time.sleep(2)
         print(f"当前页面URL: {driver.current_url}", flush=True)
-        # 打印签到页真实 title 与源码头部，定位 detect_login_required 为何命中
-        try:
-            print(f"[诊断] 签到页 title: {driver.title}", flush=True)
-            print(f"[诊断] 签到页源码头部: {driver.page_source[:800]}", flush=True)
-        except Exception as diag_error:
-            print(f"[诊断] 读取签到页失败: {str(diag_error)}", flush=True)
 
         print("检测登录状态...", flush=True)
         if detect_login_required(driver):
@@ -406,9 +397,7 @@ def setup_driver_and_cookies():
         driver.get('https://www.nodeseek.com')
 
         # 首次访问可能落在 Cloudflare 挑战页，需等其自动放行后再注入 cookie
-        print("[诊断] 注入前 title:", driver.title, flush=True)
         wait_for_cloudflare(driver)
-        print("[诊断] 过盾后 title:", driver.title, flush=True)
 
         pairs, skipped = parse_cookie_string(cookie)
         for reason in skipped:
@@ -448,27 +437,8 @@ def setup_driver_and_cookies():
         if not wait_for_cloudflare(driver):
             print("Cloudflare 挑战未通过，后续操作很可能失败", flush=True)
 
-        # 注入 cookie 并刷新后，访问鉴权页确认登录态是否真正建立
-        print("[诊断] 刷新后首页 title:", driver.title, flush=True)
-        try:
-            # 个人主页需要登录才能正常显示，访问它可验证登录态
-            driver.get('https://www.nodeseek.com/me')
-            time.sleep(3)
-            me_title = driver.title or ""
-            me_url = driver.current_url or ""
-            print(f"[诊断] /me 页 title: {me_title}", flush=True)
-            print(f"[诊断] /me 页 URL: {me_url}", flush=True)
-            # 打印页面可见文本前 300 字，判断是登录态个人页还是被重定向到登录
-            me_text = BeautifulSoup(driver.page_source, 'html.parser').get_text(' ', strip=True)
-            print(f"[诊断] /me 页文本片段: {me_text[:300]}", flush=True)
-            # 浏览器实际持有的 cookie 名称，确认我们注入的全部落地
-            present = [c.get('name') for c in driver.get_cookies()]
-            print(f"[诊断] 浏览器持有 cookie: {present}", flush=True)
-        except Exception as diag_error:
-            print(f"[诊断] 验证登录态失败: {str(diag_error)}", flush=True)
-
         return driver
-        
+
     except Exception as e:
         print(f"设置浏览器和Cookie时出错: {str(e)}")
         print("详细错误信息:")
