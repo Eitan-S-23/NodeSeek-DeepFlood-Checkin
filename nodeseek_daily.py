@@ -216,6 +216,9 @@ def load_sites():
 
     if not sites:
         print("未配置任何站点 cookie（至少需要 NS_COOKIE）")
+    # 打印站点数与各 cookie 长度（不含值），便于确认 secret 是否真正生效
+    print(f"加载到 {len(sites)} 个站点: " + ", ".join(
+        f"{s.name}(cookie长度{len(s.cookie)})" for s in sites))
     return sites
 
 
