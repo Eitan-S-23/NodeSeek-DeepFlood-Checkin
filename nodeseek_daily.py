@@ -158,6 +158,15 @@ randomInputStr = ["bd","绑定","帮顶"]
 # 命中任一即说明当前页面不是论坛正文，此时任何元素定位都必然超时。
 CF_CHALLENGE_MARKERS = ("just a moment", "challenges.cloudflare.com", "cf-browser-verification")
 
+# 签到页地址。直接导航到此页，避免点击头部签到图标时被 #nsk-head 容器遮挡。
+SIGN_PAGE_URL = 'https://www.nodeseek.com/signIn.html'
+
+# 页面已签到的文案特征。命中任一说明今日已领取，属于正常结果而非失败。
+SIGNED_MARKERS = ("今日已签到", "已经签到", "已签到", "明天再来", "请明天")
+
+# 需要登录的文案特征。命中说明 cookie 失效，应明确报失败而不是当成已签到。
+LOGIN_REQUIRED_MARKERS = ("请先登录", "登录后可", "立即登录")
+
 
 def is_cloudflare_challenge(driver):
     """判断当前页面是否停留在 Cloudflare 挑战页。"""
@@ -207,65 +216,95 @@ def extract_sign_reward(driver):
         print(f"提取签到收益失败: {str(e)}")
         return ""
 
-def click_sign_icon(driver):
+def detect_already_signed(driver):
     """
-    尝试点击签到图标和试试手气按钮的通用方法
-    返回: {"success": bool, "detail": str}，detail 为通知用的中文结果描述
+    判断签到页是否已显示"今日已签到"之类的文案。
+    用于区分"确实签过了"与"点击没生效"，避免后者被误报为成功。
     """
     try:
-        print("开始查找签到图标...")
-        # 使用更精确的选择器定位签到图标
-        sign_icon = WebDriverWait(driver, 30).until(
-            EC.presence_of_element_located((By.XPATH, "//span[@title='签到']"))
-        )
-        print("找到签到图标，准备点击...")
-        
-        # 确保元素可见和可点击
-        driver.execute_script("arguments[0].scrollIntoView(true);", sign_icon)
-        time.sleep(0.5)
-        
-        # 打印元素信息
-        print(f"签到图标元素: {sign_icon.get_attribute('outerHTML')}")
-        
-        # 尝试点击
-        try:
-            
-            
-            sign_icon.click()
-            print("签到图标点击成功")
-        except Exception as click_error:
-            print(f"点击失败，尝试使用 JavaScript 点击: {str(click_error)}")
-            driver.execute_script("arguments[0].click();", sign_icon)
-        
-        print("等待页面跳转...")
-        time.sleep(5)
-        
-        # 打印当前URL
-        print(f"当前页面URL: {driver.current_url}")
-        
-        # 点击"试试手气"按钮
-        try:
-            click_button:None
-            
-            if ns_random:
-                click_button = WebDriverWait(driver, 5).until(
-                EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), '试试手气')]"))
-            )
-            else:
-                click_button = WebDriverWait(driver, 5).until(
-                EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), '鸡腿 x 5')]"))
-            )
-            
-            click_button.click()
-            print("完成试试手气点击")
-            time.sleep(2)
-            reward = extract_sign_reward(driver)
-            detail = f"签到成功，{reward}" if reward else "签到成功"
-        except Exception as lucky_error:
-            print(f"试试手气按钮点击失败或者签到过了: {str(lucky_error)}")
-            detail = "今日已签到（未找到领取按钮）"
+        text = BeautifulSoup(driver.page_source, 'html.parser').get_text(' ', strip=True)
+        return any(marker in text for marker in SIGNED_MARKERS)
+    except Exception as e:
+        print(f"检测已签到状态失败: {str(e)}")
+        return False
 
-        return {"success": True, "detail": detail}
+
+def detect_login_required(driver):
+    """判断当前页面是否要求登录，说明 cookie 已失效。"""
+    try:
+        text = BeautifulSoup(driver.page_source, 'html.parser').get_text(' ', strip=True)
+        return any(marker in text for marker in LOGIN_REQUIRED_MARKERS)
+    except Exception as e:
+        print(f"检测登录状态失败: {str(e)}")
+        return False
+
+
+def click_sign_icon(driver):
+    """
+    执行签到：直接打开签到页并领取奖励。
+
+    不再点击头部的签到图标——该图标会被 #nsk-head 容器遮挡导致
+    element click intercepted，直接导航到签到页可绕开遮挡。
+
+    返回: {"success": bool, "detail": str}，detail 为通知用的中文结果描述。
+    只有确认领取成功或页面明确显示已签到才算成功；
+    既没领到又没有已签到标志时一律视为失败，避免掩盖真实问题。
+    """
+    try:
+        print(f"正在打开签到页: {SIGN_PAGE_URL}")
+        driver.get(SIGN_PAGE_URL)
+
+        # 签到页同样可能被 Cloudflare 拦下
+        if not wait_for_cloudflare(driver):
+            return {"success": False, "detail": "签到失败: 未能通过 Cloudflare 挑战"}
+
+        time.sleep(2)
+        print(f"当前页面URL: {driver.current_url}")
+
+        if detect_login_required(driver):
+            return {"success": False, "detail": "签到失败: cookie 已失效，需要重新登录"}
+
+        # 先看是否已经签过，已签过时页面不会再有领取按钮
+        if detect_already_signed(driver):
+            print("页面显示今日已签到")
+            return {"success": True, "detail": "今日已签到"}
+
+        button_text = '试试手气' if ns_random else '鸡腿 x 5'
+        print(f"查找领取按钮: {button_text}")
+        try:
+            click_button = WebDriverWait(driver, 15).until(
+                EC.element_to_be_clickable((By.XPATH, f"//button[contains(text(), '{button_text}')]"))
+            )
+        except Exception as find_error:
+            # 既没有已签到标志又找不到按钮，属于异常状态，必须报失败而非静默成功
+            print(f"未找到领取按钮: {str(find_error)}")
+            print(f"当前页面源码片段: {driver.page_source[:500]}...")
+            return {"success": False, "detail": f"签到失败: 未找到领取按钮（{button_text}），且页面无已签到标志"}
+
+        # 滚动到按钮再点击，避免被固定头部遮挡；原生点击失败时回退 JS 点击
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", click_button)
+        time.sleep(0.5)
+        try:
+            click_button.click()
+        except Exception as click_error:
+            print(f"原生点击失败，改用 JavaScript 点击: {str(click_error)}")
+            driver.execute_script("arguments[0].click();", click_button)
+
+        print("已点击领取按钮，等待结果...")
+        time.sleep(3)
+
+        # 校验结果：拿到收益描述或出现已签到标志才算成功
+        reward = extract_sign_reward(driver)
+        if reward:
+            print(f"签到成功: {reward}")
+            return {"success": True, "detail": f"签到成功，{reward}"}
+
+        if detect_already_signed(driver):
+            print("点击后页面显示已签到")
+            return {"success": True, "detail": "签到成功"}
+
+        print(f"点击后未能确认结果，页面源码片段: {driver.page_source[:500]}...")
+        return {"success": False, "detail": "签到失败: 已点击领取按钮但未能确认签到结果"}
 
     except Exception as e:
         print(f"签到过程中出错:")
