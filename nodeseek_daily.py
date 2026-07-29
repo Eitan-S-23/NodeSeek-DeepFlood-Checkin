@@ -215,6 +215,45 @@ def extract_sign_reward(driver):
         print(f"提取签到收益失败: {str(e)}")
         return ""
 
+
+def fetch_account_summary(driver):
+    """
+    从主页抓取账号概览：等级、总鸡腿数，以及评论数、主题数等可见统计。
+
+    这些信息显示在主页左上角用户信息区，文案形如"等级 Lv 1""鸡腿 118"
+    "评论数 123""主题贴数 45"等。不同账号/时期可见字段可能略有差异，
+    因此逐项独立解析，缺哪项就不带哪项，不影响其他项。
+    解析失败时返回空列表，由调用方决定是否加入通知。
+    """
+    summary = {}
+    try:
+        driver.get('https://www.nodeseek.com')
+        if not wait_for_cloudflare(driver):
+            print("抓取账号概览时未通过 Cloudflare，跳过")
+            return summary
+        time.sleep(2)
+
+        text = BeautifulSoup(driver.page_source, 'html.parser').get_text(' ', strip=True)
+        # 各字段按"label + 数字"匹配，标签与数字之间允许空白
+        patterns = {
+            'level': r'等级\s*(?:Lv\.?\s*)?(\d+)',
+            'chicken_leg': r'鸡腿\s*(\d+(?:\.\d+)?)',
+            'comment': r'评论数?\s*(\d+)',
+            'topic': r'主题贴?数?\s*(\d+)',
+        }
+        for key, pattern in patterns.items():
+            match = re.search(pattern, text)
+            if match:
+                summary[key] = match.group(1)
+
+        if not summary:
+            # 一项都没抓到时打印片段，便于排查页面结构变化，不包含敏感信息
+            print(f"未抓到任何账号概览字段，页面文本片段: {text[:300]}")
+    except Exception as e:
+        print(f"抓取账号概览失败: {str(e)}")
+    return summary
+
+
 def detect_already_signed(driver):
     """
     判断签到页是否已显示"今日已签到"之类的文案。
@@ -543,12 +582,23 @@ def nodeseek_comment(driver):
     return stats
 
 
-def build_notify_content(sign_result, comment_stats):
+def build_notify_content(sign_result, comment_stats, account_summary=None):
     """把签到与评论结果拼成通知正文（纯文本，各渠道通用）。"""
     lines = [
         f"执行时间: {time.strftime('%Y-%m-%d %H:%M:%S')}",
         f"签到结果: {sign_result['detail']}",
     ]
+
+    # 账号概览：等级、总鸡腿数等。抓取失败或缺字段时跳过对应行，不影响其余
+    if account_summary:
+        if account_summary.get('level'):
+            lines.append(f"当前等级: Lv {account_summary['level']}")
+        if account_summary.get('chicken_leg'):
+            lines.append(f"总鸡腿数: {account_summary['chicken_leg']}")
+        if account_summary.get('comment'):
+            lines.append(f"评论数: {account_summary['comment']}")
+        if account_summary.get('topic'):
+            lines.append(f"主题贴数: {account_summary['topic']}")
 
     # 附加任务被开关关闭时只说明状态，不输出无意义的 0/0 统计
     if comment_stats is None:
@@ -629,10 +679,16 @@ def run():
         comment_stats = None
 
     sign_result = click_sign_icon(driver)
+
+    # 签到完成后顺带抓取账号概览（等级、总鸡腿数等），加入通知正文。
+    # 无论签到成功与否都尝试抓取——失败时也能在通知里看到当前状态。
+    print("抓取账号概览...")
+    account_summary = fetch_account_summary(driver)
+
     print("脚本执行完成")
 
     title = "NodeSeek 每日任务" + ("" if sign_result["success"] else "（签到异常）")
-    notify.send(title, build_notify_content(sign_result, comment_stats))
+    notify.send(title, build_notify_content(sign_result, comment_stats, account_summary))
     return 0 if sign_result["success"] else 1
 
 
