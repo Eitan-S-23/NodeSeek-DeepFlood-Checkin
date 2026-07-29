@@ -402,21 +402,25 @@ def click_sign_icon(driver, site):
             print("检测到需要登录", flush=True)
             return {"success": False, "detail": "签到失败: cookie 已失效，需要重新登录"}
 
-        print("检测是否已签到...", flush=True)
-        # 先看是否已经签过，已签过时页面不会再有领取按钮
-        if detect_already_signed(driver):
-            print("页面显示今日已签到", flush=True)
-            return {"success": True, "detail": "今日已签到"}
-
+        # 关键：先找领取按钮，而不是先看"已签到"文案。
+        # 原因是签到收益文案（"今日签到获得鸡腿x个"）在站点按自然日重置后会继续挂着，
+        # 直到下次签到。若先看文案，零点刚过、旧文案仍在而新按钮已出现时，
+        # 会被误判成"今日已签到"而跳过点击。
+        # 正确顺序：有按钮→未签到，点击领取；无按钮→再核对文案确认是否真已签过。
         button_text = '试试手气' if ns_random else '鸡腿 x 5'
         print(f"查找领取按钮: {button_text}", flush=True)
         try:
-            click_button = WebDriverWait(driver, 15).until(
+            # 已签到场景下没有按钮，用较短超时避免空等 15 秒
+            click_button = WebDriverWait(driver, 6).until(
                 EC.element_to_be_clickable((By.XPATH, f"//button[contains(text(), '{button_text}')]"))
             )
-        except Exception as find_error:
-            # 既没有已签到标志又找不到按钮，属于异常状态，必须报失败而非静默成功
-            print(f"未找到领取按钮: {str(find_error)}", flush=True)
+        except Exception:
+            # 找不到按钮，再核对是否为已签到状态
+            print("未找到领取按钮，核对是否已签到...", flush=True)
+            if detect_already_signed(driver):
+                print("页面显示今日已签到", flush=True)
+                return {"success": True, "detail": "今日已签到"}
+            # 既无按钮又无已签到文案，属于异常状态，如实报失败而非静默成功
             try:
                 print(f"当前页面源码片段: {driver.page_source[:500]}...", flush=True)
             except Exception:
