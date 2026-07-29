@@ -43,7 +43,9 @@ jobs:
         env:
           NS_COOKIE: ${{ secrets.NS_COOKIE }}
           NS_RANDOM: ${{ vars.NS_RANDOM || secrets.NS_RANDOM }}
-          HEADLESS: "true"
+          # 在 xvfb 提供的虚拟显示下跑有头浏览器：headless 指纹会被 Cloudflare 拦在挑战页，
+          # 有头模式指纹更接近真实用户，是目前能通过 5 秒盾的可行方式。
+          HEADLESS: "false"
           # 除签到外的任务（评论、加鸡腿）总开关，未配置时默认关闭
           NS_EXTRA_TASKS: ${{ vars.NS_EXTRA_TASKS || secrets.NS_EXTRA_TASKS }}
           # Telegram 通知（可选）
@@ -59,4 +61,4 @@ jobs:
           WECOM_AGENTID: ${{ secrets.WECOM_AGENTID }}
           WECOM_TOUSER: ${{ secrets.WECOM_TOUSER }}
         run: |
-          python nodeseek_daily.py
+          xvfb-run -a --server-args="-screen 0 1920x1080x24" python nodeseek_daily.py

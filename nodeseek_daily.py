@@ -107,6 +107,46 @@ extra_tasks_enabled = env_bool("NS_EXTRA_TASKS")
 
 randomInputStr = ["bd","绑定","帮顶"]
 
+# Cloudflare 挑战页（"Just a moment..." 5 秒盾）的特征。
+# 命中任一即说明当前页面不是论坛正文，此时任何元素定位都必然超时。
+CF_CHALLENGE_MARKERS = ("just a moment", "challenges.cloudflare.com", "cf-browser-verification")
+
+
+def is_cloudflare_challenge(driver):
+    """判断当前页面是否停留在 Cloudflare 挑战页。"""
+    try:
+        title = (driver.title or "").lower()
+        if any(marker in title for marker in CF_CHALLENGE_MARKERS):
+            return True
+        # 挑战页体积很小，只截取头部即可判断，避免拉取整页源码
+        head = (driver.page_source or "")[:3000].lower()
+        return any(marker in head for marker in CF_CHALLENGE_MARKERS)
+    except Exception as e:
+        print(f"检测 Cloudflare 挑战页失败: {str(e)}")
+        return False
+
+
+def wait_for_cloudflare(driver, timeout=60):
+    """
+    等待 Cloudflare 挑战自行通过。
+    undetected-chromedriver 通常能自动过盾，但需要给它时间；
+    这里轮询直到页面不再是挑战页，超时返回 False 由调用方决定如何处理。
+    """
+    if not is_cloudflare_challenge(driver):
+        return True
+
+    print(f"检测到 Cloudflare 挑战页，最多等待 {timeout} 秒...")
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        time.sleep(3)
+        if not is_cloudflare_challenge(driver):
+            print("Cloudflare 挑战已通过")
+            return True
+
+    print("Cloudflare 挑战在超时内未通过")
+    return False
+
+
 def extract_sign_reward(driver):
     """
     从签到页面文本中提取鸡腿收益描述，用于通知正文。
@@ -207,17 +247,22 @@ def setup_driver_and_cookies():
         options = uc.ChromeOptions()
         options.add_argument('--no-sandbox')
         options.add_argument('--disable-dev-shm-usage')
-        
+        # 以下参数与是否无头无关，始终降低自动化特征。
+        # 不覆盖 User-Agent：伪造的 UA 若与真实平台和 Chrome 版本不一致，
+        # 反而会成为 Cloudflare 的识别特征，让 undetected-chromedriver 使用真实 UA。
+        options.add_argument('--disable-blink-features=AutomationControlled')
+        options.add_argument('--window-size=1920,1080')
+
         if headless:
-            print("启用无头模式...")
+            # 无头模式指纹更容易被 Cloudflare 识别。
+            # 在 GitHub Actions 中建议改用 xvfb-run 提供虚拟显示并令 HEADLESS=false，
+            # 以有头浏览器运行，通过挑战的概率明显更高。
+            print("启用无头模式（Cloudflare 拦截概率较高）...")
             options.add_argument('--headless=new')
-            # 降低自动化特征
-            options.add_argument('--disable-blink-features=AutomationControlled')
             options.add_argument('--disable-gpu')
-            options.add_argument('--window-size=1920,1080')
-            # 不覆盖 User-Agent：伪造的 UA 若与真实平台和 Chrome 版本不一致，
-            # 反而会成为 Cloudflare 的识别特征。让 undetected-chromedriver 使用真实 UA。
-        
+        else:
+            print("使用有头模式（需要可用的显示环境，如 xvfb）...")
+
         print("正在启动Chrome...")
         # undetected-chromedriver 默认下载最新版驱动，而 runner 预装的 Chrome 往往落后一个大版本，
         # 二者不匹配会直接抛 SessionNotCreatedException。显式传入实际大版本号强制取匹配的驱动。
@@ -229,23 +274,30 @@ def setup_driver_and_cookies():
             print("未能检测到 Chrome 版本，回退为自动匹配")
             driver = uc.Chrome(options=options)
 
-        if headless:
-            # 执行 JavaScript 来修改 webdriver 标记
-            driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-            driver.set_window_size(1920, 1080)
-        
+        # 隐藏 webdriver 标记，有头/无头模式都需要
+        driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        driver.set_window_size(1920, 1080)
+
         print("Chrome启动成功")
-        
+
         print("正在设置cookie...")
         driver.get('https://www.nodeseek.com')
-        
-        # 等待页面加载完成
-        time.sleep(5)
-        
+
+        # 首次访问可能落在 Cloudflare 挑战页，需等其自动放行后再注入 cookie
+        wait_for_cloudflare(driver)
+
         injected = 0
         for cookie_item in cookie.split(';'):
+            item = cookie_item.strip()
+            if not item:
+                continue
             try:
-                name, value = cookie_item.strip().split('=', 1)
+                if '=' not in item:
+                    # 常见于复制时带了 "Cookie: " 前缀或结尾多余分号，跳过并给出可定位的提示
+                    print(f"跳过格式异常的 cookie 片段（缺少 = 号）: {item[:12]}...")
+                    continue
+
+                name, value = item.split('=', 1)
                 name = name.strip()
                 if not name:
                     continue
@@ -275,6 +327,10 @@ def setup_driver_and_cookies():
         print("刷新页面...")
         driver.refresh()
         time.sleep(5)  # 增加等待时间
+
+        # 带上登录态后可能再次遇到挑战，这里等待通过后再交给后续任务
+        if not wait_for_cloudflare(driver):
+            print("Cloudflare 挑战未通过，后续操作很可能失败")
 
         return driver
         
