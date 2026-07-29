@@ -54,6 +54,53 @@ def should_skip_cookie(name):
     return any(lowered.startswith(prefix) for prefix in SKIP_COOKIE_PREFIXES)
 
 
+def parse_cookie_string(raw):
+    """
+    解析 NS_COOKIE 字符串，返回 (待注入的 (name, value) 列表, 跳过原因列表)。
+
+    只在名称合法的分号处切分：cookie 值本身可能含分号（例如被截断的 JSON），
+    若无条件按分号切分会把一个 cookie 拆成两半，产生不含 = 号的残缺片段。
+    因此逐段判断——某段不含 = 号或等号左侧不像合法 cookie 名时，
+    视为上一个 cookie 值的延续并拼回去。
+    同时把换行当作分隔符，便于 secret 多行粘贴。
+
+    跳过原因中不含 cookie 值，可安全打印到 CI 日志。
+    """
+    pairs = []
+    skipped = []
+    if not raw:
+        return pairs, skipped
+
+    # cookie 名称的合法字符集（RFC 6265 token），据此判断一段是否为新 cookie 的开头
+    name_pattern = re.compile(r'^[A-Za-z0-9!#$%&\'*+\-.^_`|~]+$')
+
+    for chunk in re.split(r'[;\r\n]+', raw):
+        segment = chunk.strip()
+        if not segment:
+            continue
+
+        name, sep, value = segment.partition('=')
+        is_new_cookie = bool(sep) and bool(name_pattern.match(name.strip()))
+
+        if is_new_cookie:
+            pairs.append([name.strip(), value.strip()])
+        elif pairs:
+            # 不像新 cookie，说明上一个 cookie 的值里含分号或换行，拼回去
+            pairs[-1][1] = f"{pairs[-1][1]};{segment}"
+        else:
+            # 开头就是异常片段，无法归属，只报告长度不输出内容
+            skipped.append(f"开头的异常片段（缺少合法 cookie 名），长度 {len(segment)}")
+
+    result = []
+    for name, value in pairs:
+        if should_skip_cookie(name):
+            skipped.append(f"{name}（与本机环境绑定或与登录态无关）")
+            continue
+        result.append((name, value))
+
+    return result, skipped
+
+
 def parse_chrome_major_version(version_output):
     """
     从 `chrome --version` 的输出中解析大版本号。
@@ -286,43 +333,35 @@ def setup_driver_and_cookies():
         # 首次访问可能落在 Cloudflare 挑战页，需等其自动放行后再注入 cookie
         wait_for_cloudflare(driver)
 
+        pairs, skipped = parse_cookie_string(cookie)
+        for reason in skipped:
+            print(f"跳过 cookie: {reason}")
+
         injected = 0
-        for cookie_item in cookie.split(';'):
-            item = cookie_item.strip()
-            if not item:
-                continue
+        for name, value in pairs:
             try:
-                if '=' not in item:
-                    # 常见于复制时带了 "Cookie: " 前缀或结尾多余分号，跳过并给出可定位的提示
-                    print(f"跳过格式异常的 cookie 片段（缺少 = 号）: {item[:12]}...")
-                    continue
-
-                name, value = item.split('=', 1)
-                name = name.strip()
-                if not name:
-                    continue
-
-                if should_skip_cookie(name):
-                    print(f"跳过 cookie: {name}（与本机环境绑定或与登录态无关）")
-                    continue
-
                 driver.add_cookie({
                     'name': name,
-                    'value': value.strip(),
+                    'value': value,
                     'domain': '.nodeseek.com',
                     'path': '/'
                 })
                 injected += 1
             except Exception as e:
-                print(f"设置cookie出错: {str(e)}")
+                print(f"注入 cookie {name} 失败: {str(e)}")
                 continue
 
-        print(f"共注入 {injected} 个 cookie")
+        # 只打印名称不打印值，便于比对配置是否完整而不泄漏凭据
+        print(f"共注入 {injected} 个 cookie: {[name for name, _ in pairs]}")
         if injected == 0:
             # 一个都没注入必然无法登录，提前失败比后续在签到步骤报错更容易定位
             print("没有任何有效 cookie 被注入，请检查 NS_COOKIE 格式（应形如 session=xxx）")
             driver.quit()
             return None
+
+        if not any(name.lower() == 'session' for name, _ in pairs):
+            # session 是登录态所在，缺失时后续必然停在未登录页面，提前点明原因
+            print("警告: 未注入名为 session 的 cookie，登录态很可能不完整")
 
         print("刷新页面...")
         driver.refresh()

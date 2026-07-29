@@ -192,5 +192,40 @@ class ShouldSkipCookieTestCase(unittest.TestCase):
         self.assertFalse(daily.should_skip_cookie("  Session  "))
 
 
+class ParseCookieStringTestCase(unittest.TestCase):
+    """校验 NS_COOKIE 解析：正常项注入、CF 项跳过、值含分号不被截断、多行粘贴容错。"""
+
+    def _names(self, pairs):
+        return [name for name, _ in pairs]
+
+    def test_基本分号分隔并跳过cf项(self):
+        pairs, _ = daily.parse_cookie_string("session=abc; cf_clearance=xyz; smac=123")
+        self.assertEqual(self._names(pairs), ["session", "smac"])
+
+    def test_值中含分号不被截断(self):
+        # 某个 cookie 的值本身含分号（如被截断的 JSON），后半段应拼回而非产生残缺片段
+        pairs, skipped = daily.parse_cookie_string("session=a;b;c; smac=1")
+        self.assertEqual(self._names(pairs), ["session", "smac"])
+        session_value = dict(pairs)["session"]
+        self.assertEqual(session_value, "a;b;c")
+        # 不应因值里的分号报告异常片段
+        self.assertEqual(skipped, [])
+
+    def test_换行作为分隔符(self):
+        pairs, _ = daily.parse_cookie_string("session=abc\nsmac=123\r\npjwt=xyz")
+        self.assertEqual(self._names(pairs), ["session", "smac", "pjwt"])
+
+    def test_跳过原因不含cookie值(self):
+        _, skipped = daily.parse_cookie_string("cf_clearance=secretvalue; session=x")
+        joined = " ".join(skipped)
+        self.assertIn("cf_clearance", joined)
+        self.assertNotIn("secretvalue", joined)
+
+    def test_空输入返回空列表(self):
+        pairs, skipped = daily.parse_cookie_string("")
+        self.assertEqual(pairs, [])
+        self.assertEqual(skipped, [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
