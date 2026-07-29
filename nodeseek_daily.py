@@ -263,34 +263,41 @@ def click_sign_icon(driver):
     既没领到又没有已签到标志时一律视为失败，避免掩盖真实问题。
     """
     try:
-        print(f"正在打开签到页: {SIGN_PAGE_URL}")
+        print(f"正在打开签到页: {SIGN_PAGE_URL}", flush=True)
         driver.get(SIGN_PAGE_URL)
 
+        print("签到页已请求，开始等待 Cloudflare...", flush=True)
         # 签到页同样可能被 Cloudflare 拦下
         if not wait_for_cloudflare(driver):
             return {"success": False, "detail": "签到失败: 未能通过 Cloudflare 挑战"}
 
         time.sleep(2)
-        print(f"当前页面URL: {driver.current_url}")
+        print(f"当前页面URL: {driver.current_url}", flush=True)
 
+        print("检测登录状态...", flush=True)
         if detect_login_required(driver):
+            print("检测到需要登录", flush=True)
             return {"success": False, "detail": "签到失败: cookie 已失效，需要重新登录"}
 
+        print("检测是否已签到...", flush=True)
         # 先看是否已经签过，已签过时页面不会再有领取按钮
         if detect_already_signed(driver):
-            print("页面显示今日已签到")
+            print("页面显示今日已签到", flush=True)
             return {"success": True, "detail": "今日已签到"}
 
         button_text = '试试手气' if ns_random else '鸡腿 x 5'
-        print(f"查找领取按钮: {button_text}")
+        print(f"查找领取按钮: {button_text}", flush=True)
         try:
             click_button = WebDriverWait(driver, 15).until(
                 EC.element_to_be_clickable((By.XPATH, f"//button[contains(text(), '{button_text}')]"))
             )
         except Exception as find_error:
             # 既没有已签到标志又找不到按钮，属于异常状态，必须报失败而非静默成功
-            print(f"未找到领取按钮: {str(find_error)}")
-            print(f"当前页面源码片段: {driver.page_source[:500]}...")
+            print(f"未找到领取按钮: {str(find_error)}", flush=True)
+            try:
+                print(f"当前页面源码片段: {driver.page_source[:500]}...", flush=True)
+            except Exception:
+                pass
             return {"success": False, "detail": f"签到失败: 未找到领取按钮（{button_text}），且页面无已签到标志"}
 
         # 滚动到按钮再点击，避免被固定头部遮挡；原生点击失败时回退 JS 点击
@@ -299,32 +306,43 @@ def click_sign_icon(driver):
         try:
             click_button.click()
         except Exception as click_error:
-            print(f"原生点击失败，改用 JavaScript 点击: {str(click_error)}")
+            print(f"原生点击失败，改用 JavaScript 点击: {str(click_error)}", flush=True)
             driver.execute_script("arguments[0].click();", click_button)
 
-        print("已点击领取按钮，等待结果...")
+        print("已点击领取按钮，等待结果...", flush=True)
         time.sleep(3)
 
         # 校验结果：拿到收益描述或出现已签到标志才算成功
         reward = extract_sign_reward(driver)
         if reward:
-            print(f"签到成功: {reward}")
+            print(f"签到成功: {reward}", flush=True)
             return {"success": True, "detail": f"签到成功，{reward}"}
 
         if detect_already_signed(driver):
-            print("点击后页面显示已签到")
+            print("点击后页面显示已签到", flush=True)
             return {"success": True, "detail": "签到成功"}
 
-        print(f"点击后未能确认结果，页面源码片段: {driver.page_source[:500]}...")
+        try:
+            print(f"点击后未能确认结果，页面源码片段: {driver.page_source[:500]}...", flush=True)
+        except Exception:
+            pass
         return {"success": False, "detail": "签到失败: 已点击领取按钮但未能确认签到结果"}
 
     except Exception as e:
-        print(f"签到过程中出错:")
-        print(f"错误类型: {type(e).__name__}")
-        print(f"错误信息: {str(e)}")
-        print(f"当前页面URL: {driver.current_url}")
-        print(f"当前页面源码片段: {driver.page_source[:500]}...")
-        print("详细错误信息:")
+        # except 块内访问 driver 可能二次抛错（如 driver 已失效），
+        # 必须单独防护，否则会逃逸到 run() 外，丢失原有错误信息。
+        print(f"签到过程中出错:", flush=True)
+        print(f"错误类型: {type(e).__name__}", flush=True)
+        print(f"错误信息: {str(e)}", flush=True)
+        try:
+            print(f"当前页面URL: {driver.current_url}", flush=True)
+        except Exception:
+            pass
+        try:
+            print(f"当前页面源码片段: {driver.page_source[:500]}...", flush=True)
+        except Exception:
+            pass
+        print("详细错误信息:", flush=True)
         traceback.print_exc()
         return {"success": False, "detail": f"签到失败: {type(e).__name__} {str(e)}"}
 
