@@ -95,13 +95,19 @@ class ChromeVersionTestCase(unittest.TestCase):
             self.assertIsNone(daily.detect_chrome_major_version())
 
 
-class BuildNotifyContentTestCase(unittest.TestCase):
-    """校验通知正文在三种结果下的表述。"""
+def _site_result(site, sign, comment_stats, summary):
+    """构造 build_notify_content 需要的单站结果元组。"""
+    return (site, sign, comment_stats, summary)
 
+
+class BuildNotifyContentTestCase(unittest.TestCase):
+    """校验通知正文在三种结果下的表述。单站与多站排版都要覆盖。"""
+
+    SITE = daily.Site("NodeSeek", "nodeseek.com", "session=x")
     SIGN_OK = {"success": True, "detail": "签到成功，获得 5 个鸡腿"}
 
     def test_附加任务关闭时说明已关闭且不输出统计(self):
-        content = daily.build_notify_content(self.SIGN_OK, None)
+        content = daily.build_notify_content([_site_result(self.SITE, self.SIGN_OK, None, {})])
         self.assertIn("签到成功", content)
         self.assertIn("已关闭", content)
         self.assertNotIn("0/0", content)
@@ -109,29 +115,70 @@ class BuildNotifyContentTestCase(unittest.TestCase):
 
     def test_附加任务开启时输出评论与鸡腿统计(self):
         stats = {"total": 20, "commented": 18, "chicken_leg": True, "error": ""}
-        content = daily.build_notify_content(self.SIGN_OK, stats)
+        content = daily.build_notify_content([_site_result(self.SITE, self.SIGN_OK, stats, {})])
         self.assertIn("成功 18/20 个帖子", content)
         self.assertIn("加鸡腿: 成功", content)
 
     def test_评论异常时正文体现异常原因(self):
         stats = {"total": 0, "commented": 0, "chicken_leg": False, "error": "TimeoutException 超时"}
-        content = daily.build_notify_content({"success": False, "detail": "签到失败"}, stats)
+        content = daily.build_notify_content(
+            [_site_result(self.SITE, {"success": False, "detail": "签到失败"}, stats, {})]
+        )
         self.assertIn("异常终止", content)
         self.assertIn("TimeoutException", content)
         self.assertIn("加鸡腿: 未成功", content)
+
+    def test_账号概览字段进入通知(self):
+        summary = {"level": "1", "chicken_leg": "118", "comment": "4", "topic": "2"}
+        content = daily.build_notify_content([_site_result(self.SITE, self.SIGN_OK, None, summary)])
+        self.assertIn("当前等级: Lv 1", content)
+        self.assertIn("总鸡腿数: 118", content)
+        self.assertIn("评论数: 4", content)
+        self.assertIn("主题贴数: 2", content)
+
+    def test_多站点分段显示且空行分隔(self):
+        ns = self.SITE
+        df = daily.Site("DeepFlood", "deepflood.com", "session=y")
+        content = daily.build_notify_content([
+            _site_result(ns, self.SIGN_OK, None, {"level": "1", "chicken_leg": "118"}),
+            _site_result(df, {"success": True, "detail": "签到成功，获得 5 个鸡腿"}, None, {"level": "2", "chicken_leg": "50"}),
+        ])
+        self.assertIn("【NodeSeek】", content)
+        self.assertIn("【DeepFlood】", content)
+        self.assertIn("总鸡腿数: 118", content)
+        self.assertIn("总鸡腿数: 50", content)
+        # 两站之间应有空行
+        self.assertIn("\n\n【DeepFlood】", content)
 
 
 class RunTestCase(unittest.TestCase):
     """校验 NS_EXTRA_TASKS 开关真正决定评论任务是否被调用。"""
 
     SIGN_OK = {"success": True, "detail": "签到成功"}
+    SITE = daily.Site("NodeSeek", "nodeseek.com", "session=x")
+    DRIVER = object()
+
+    def _patch_run_env(self, **overrides):
+        """统一 mock 出 run 所需的外部依赖。"""
+        patches = {
+            "load_sites": mock.patch.object(daily, "load_sites", return_value=[self.SITE]),
+            "create_driver": mock.patch.object(daily, "create_driver", return_value=self.DRIVER),
+            "inject_site_cookies": mock.patch.object(daily, "inject_site_cookies", return_value=True),
+            "nodeseek_comment": mock.patch.object(daily, "nodeseek_comment"),
+            "click_sign_icon": mock.patch.object(daily, "click_sign_icon", return_value=self.SIGN_OK),
+            "fetch_account_summary": mock.patch.object(daily, "fetch_account_summary", return_value={}),
+            "send": mock.patch.object(daily.notify, "send"),
+        }
+        for key, patcher in patches.items():
+            overrides.setdefault(key, patcher)
+        return overrides
 
     def test_开关关闭时不调用评论任务(self):
+        m = self._patch_run_env()
         with mock.patch.object(daily, "extra_tasks_enabled", False), \
-                mock.patch.object(daily, "setup_driver_and_cookies", return_value=object()), \
-                mock.patch.object(daily, "nodeseek_comment") as comment, \
-                mock.patch.object(daily, "click_sign_icon", return_value=self.SIGN_OK), \
-                mock.patch.object(daily.notify, "send") as send:
+                m["load_sites"], m["create_driver"], m["inject_site_cookies"], \
+                m["nodeseek_comment"] as comment, m["click_sign_icon"], \
+                m["fetch_account_summary"], m["send"] as send:
             code = daily.run()
 
         comment.assert_not_called()
@@ -140,11 +187,11 @@ class RunTestCase(unittest.TestCase):
 
     def test_开关开启时调用评论任务(self):
         stats = {"total": 20, "commented": 20, "chicken_leg": True, "error": ""}
+        m = self._patch_run_env(nodeseek_comment=mock.patch.object(daily, "nodeseek_comment", return_value=stats))
         with mock.patch.object(daily, "extra_tasks_enabled", True), \
-                mock.patch.object(daily, "setup_driver_and_cookies", return_value=object()), \
-                mock.patch.object(daily, "nodeseek_comment", return_value=stats) as comment, \
-                mock.patch.object(daily, "click_sign_icon", return_value=self.SIGN_OK), \
-                mock.patch.object(daily.notify, "send") as send:
+                m["load_sites"], m["create_driver"], m["inject_site_cookies"], \
+                m["nodeseek_comment"] as comment, m["click_sign_icon"], \
+                m["fetch_account_summary"], m["send"] as send:
             code = daily.run()
 
         comment.assert_called_once()
@@ -152,11 +199,11 @@ class RunTestCase(unittest.TestCase):
         self.assertIn("20/20", send.call_args.args[1])
 
     def test_浏览器初始化失败时推送失败通知且不执行任务(self):
+        m = self._patch_run_env(create_driver=mock.patch.object(daily, "create_driver", return_value=None))
         with mock.patch.object(daily, "extra_tasks_enabled", True), \
-                mock.patch.object(daily, "setup_driver_and_cookies", return_value=None), \
-                mock.patch.object(daily, "nodeseek_comment") as comment, \
-                mock.patch.object(daily, "click_sign_icon") as sign, \
-                mock.patch.object(daily.notify, "send") as send:
+                m["load_sites"], m["create_driver"], m["inject_site_cookies"], \
+                m["nodeseek_comment"] as comment, m["click_sign_icon"] as sign, \
+                m["fetch_account_summary"], m["send"] as send:
             code = daily.run()
 
         comment.assert_not_called()
@@ -165,11 +212,12 @@ class RunTestCase(unittest.TestCase):
         self.assertIn("失败", send.call_args.args[0])
 
     def test_签到失败时退出码为1(self):
+        m = self._patch_run_env(click_sign_icon=mock.patch.object(
+            daily, "click_sign_icon", return_value={"success": False, "detail": "签到失败: 超时"}))
         with mock.patch.object(daily, "extra_tasks_enabled", False), \
-                mock.patch.object(daily, "setup_driver_and_cookies", return_value=object()), \
-                mock.patch.object(daily, "click_sign_icon",
-                                  return_value={"success": False, "detail": "签到失败: 超时"}), \
-                mock.patch.object(daily.notify, "send") as send:
+                m["load_sites"], m["create_driver"], m["inject_site_cookies"], \
+                m["nodeseek_comment"], m["click_sign_icon"], \
+                m["fetch_account_summary"], m["send"] as send:
             code = daily.run()
 
         self.assertEqual(code, 1)

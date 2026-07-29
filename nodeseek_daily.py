@@ -158,10 +158,71 @@ randomInputStr = ["bd","绑定","帮顶"]
 # 命中任一即说明当前页面不是论坛正文，此时任何元素定位都必然超时。
 CF_CHALLENGE_MARKERS = ("just a moment", "challenges.cloudflare.com", "cf-browser-verification")
 
-# 签到页地址。
+# 签到页相对路径（各站相同，因为 deepflood 与 nodeseek 同一套代码）。
 # 注意 signIn.html 是登录/注册页，不是签到页——二者字面相近容易混淆，
 # 直连 signIn 会被站点判定为需要登录。签到入口实际在 /board。
-SIGN_PAGE_URL = 'https://www.nodeseek.com/board'
+SIGN_PATH = '/board'
+
+
+class Site:
+    """
+    单个签到站点配置。
+
+    nodeseek 与其子站 deepflood 同一套代码、同样的页面结构，区别只在域名和 cookie。
+    把站点抽象出来，避免域名/cookie 散落硬编码，多站点可顺序签到。
+    """
+
+    def __init__(self, name, domain, cookie):
+        self.name = name          # 用于日志与通知标题，如 "NodeSeek" / "DeepFlood"
+        self.domain = domain      # 不含协议，如 nodeseek.com
+        self.cookie = cookie      # 原始 cookie 字符串，形如 "session=xxx; pjwt=yyy"
+        self.base = f"https://www.{domain}"
+
+    @property
+    def cookie_domain(self):
+        # 注入 cookie 时用的 domain，带前导点以覆盖子域
+        return f".{self.domain}"
+
+    @property
+    def home_url(self):
+        return self.base
+
+    @property
+    def sign_url(self):
+        return f"{self.base}{SIGN_PATH}"
+
+    @property
+    def trade_url(self):
+        return f"{self.base}/categories/trade"
+
+
+def load_sites():
+    """
+    从环境变量加载要签到的站点列表，至少返回 nodeseek。
+
+    NS_COOKIE: nodeseek 的 cookie（向后兼容，老配置无需改动）
+    DEEPFLOOD_COOKIE: deepflood 子站的 cookie，配置后才会加入第二站
+
+    若两站都配置则顺序签到，中间加随机延迟避免被判定为机器批量行为。
+    """
+    sites = []
+    ns_cookie = os.environ.get("NS_COOKIE") or os.environ.get("COOKIE")
+    if ns_cookie:
+        sites.append(Site("NodeSeek", "nodeseek.com", ns_cookie))
+
+    df_cookie = os.environ.get("DEEPFLOOD_COOKIE")
+    if df_cookie:
+        sites.append(Site("DeepFlood", "deepflood.com", df_cookie))
+
+    if not sites:
+        print("未配置任何站点 cookie（至少需要 NS_COOKIE）")
+    return sites
+
+
+# 两站签到之间的随机延迟范围（秒），降低被风控判为批量行为的概率
+SITE_GAP_MIN = int(os.environ.get("SITE_GAP_MIN", "60"))
+SITE_GAP_MAX = int(os.environ.get("SITE_GAP_MAX", "180"))
+
 
 # 页面已签到的文案特征。命中任一说明今日已领取，属于正常结果而非失败。
 # 注意签到后页面实际显示"今日签到获得鸡腿x个"，靠"今日签到"+"获得...鸡腿"
@@ -223,9 +284,9 @@ def extract_sign_reward(driver):
         return ""
 
 
-def fetch_account_summary(driver):
+def fetch_account_summary(driver, site):
     """
-    从主页抓取账号概览：等级、总鸡腿数，以及评论数、主题数等可见统计。
+    从指定站点主页抓取账号概览：等级、总鸡腿数，以及评论数、主题数等可见统计。
 
     这些信息显示在主页左上角用户信息区，文案形如"等级 Lv 1""鸡腿 118"
     "评论数 123""主题贴数 45"等。不同账号/时期可见字段可能略有差异，
@@ -234,9 +295,9 @@ def fetch_account_summary(driver):
     """
     summary = {}
     try:
-        driver.get('https://www.nodeseek.com')
+        driver.get(site.home_url)
         if not wait_for_cloudflare(driver):
-            print("抓取账号概览时未通过 Cloudflare，跳过")
+            print(f"[{site.name}] 抓取账号概览时未通过 Cloudflare，跳过")
             return summary
         time.sleep(2)
 
@@ -255,9 +316,9 @@ def fetch_account_summary(driver):
 
         if not summary:
             # 一项都没抓到时打印片段，便于排查页面结构变化，不包含敏感信息
-            print(f"未抓到任何账号概览字段，页面文本片段: {text[:300]}")
+            print(f"[{site.name}] 未抓到任何账号概览字段，页面文本片段: {text[:300]}")
     except Exception as e:
-        print(f"抓取账号概览失败: {str(e)}")
+        print(f"[{site.name}] 抓取账号概览失败: {str(e)}")
     return summary
 
 
@@ -297,19 +358,19 @@ def detect_login_required(driver):
         return False
 
 
-def click_sign_icon(driver):
+def click_sign_icon(driver, site):
     """
-    执行签到：直接打开签到页 /board 并领取奖励。
+    执行指定站点签到：直接打开签到页 /board 并领取奖励。
 
     返回: {"success": bool, "detail": str}，detail 为通知用的中文结果描述。
     只有确认领取成功或页面明确显示已签到才算成功；
     既没领到又没有已签到标志时一律视为失败，避免掩盖真实问题。
     """
     try:
-        print(f"正在打开签到页: {SIGN_PAGE_URL}", flush=True)
-        driver.get(SIGN_PAGE_URL)
+        print(f"[{site.name}] 正在打开签到页: {site.sign_url}", flush=True)
+        driver.get(site.sign_url)
 
-        print("签到页已请求，开始等待 Cloudflare...", flush=True)
+        print(f"[{site.name}] 签到页已请求，开始等待 Cloudflare...", flush=True)
         # 签到页同样可能被 Cloudflare 拦下
         if not wait_for_cloudflare(driver):
             return {"success": False, "detail": "签到失败: 未能通过 Cloudflare 挑战"}
@@ -389,19 +450,12 @@ def click_sign_icon(driver):
         traceback.print_exc()
         return {"success": False, "detail": f"签到失败: {type(e).__name__} {str(e)}"}
 
-def setup_driver_and_cookies():
+def create_driver():
     """
-    初始化浏览器并设置cookie的通用方法
-    返回: 设置好cookie的driver实例
+    初始化浏览器实例，不绑定任何站点 cookie。
+    多站点共用同一个 driver，各自注入自己的 cookie 后操作各自域名。
     """
     try:
-        cookie = os.environ.get("NS_COOKIE") or os.environ.get("COOKIE")
-        headless = env_bool("HEADLESS", default=True)
-
-        if not cookie:
-            print("未找到cookie配置")
-            return None
-            
         print("开始初始化浏览器...")
         options = uc.ChromeOptions()
         options.add_argument('--no-sandbox')
@@ -436,18 +490,31 @@ def setup_driver_and_cookies():
         # 隐藏 webdriver 标记，有头/无头模式都需要
         driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         driver.set_window_size(1920, 1080)
-
         print("Chrome启动成功")
+        return driver
 
-        print("正在设置cookie...")
-        driver.get('https://www.nodeseek.com')
+    except Exception as e:
+        print(f"初始化浏览器出错: {str(e)}")
+        print("详细错误信息:")
+        print(traceback.format_exc())
+        return None
+
+
+def inject_site_cookies(driver, site):
+    """
+    为指定站点注入 cookie 并刷新确认登录态。
+    返回 True 表示注入成功且看起来已登录，False 表示注入失败。
+    """
+    try:
+        print(f"[{site.name}] 正在设置cookie...", flush=True)
+        driver.get(site.home_url)
 
         # 首次访问可能落在 Cloudflare 挑战页，需等其自动放行后再注入 cookie
         wait_for_cloudflare(driver)
 
-        pairs, skipped = parse_cookie_string(cookie)
+        pairs, skipped = parse_cookie_string(site.cookie)
         for reason in skipped:
-            print(f"跳过 cookie: {reason}", flush=True)
+            print(f"[{site.name}] 跳过 cookie: {reason}", flush=True)
 
         injected = 0
         for name, value in pairs:
@@ -455,52 +522,63 @@ def setup_driver_and_cookies():
                 driver.add_cookie({
                     'name': name,
                     'value': value,
-                    'domain': '.nodeseek.com',
+                    'domain': site.cookie_domain,
                     'path': '/'
                 })
                 injected += 1
             except Exception as e:
-                print(f"注入 cookie {name} 失败: {str(e)}")
+                print(f"[{site.name}] 注入 cookie {name} 失败: {str(e)}")
                 continue
 
         # 只打印名称不打印值，便于比对配置是否完整而不泄漏凭据
-        print(f"共注入 {injected} 个 cookie: {[name for name, _ in pairs]}")
+        print(f"[{site.name}] 共注入 {injected} 个 cookie: {[name for name, _ in pairs]}")
         if injected == 0:
-            # 一个都没注入必然无法登录，提前失败比后续在签到步骤报错更容易定位
-            print("没有任何有效 cookie 被注入，请检查 NS_COOKIE 格式（应形如 session=xxx）")
-            driver.quit()
-            return None
+            print(f"[{site.name}] 没有任何有效 cookie 被注入，请检查 cookie 格式（应形如 session=xxx）")
+            return False
 
         if not any(name.lower() == 'session' for name, _ in pairs):
             # session 是登录态所在，缺失时后续必然停在未登录页面，提前点明原因
-            print("警告: 未注入名为 session 的 cookie，登录态很可能不完整")
+            print(f"[{site.name}] 警告: 未注入名为 session 的 cookie，登录态很可能不完整")
 
-        print("刷新页面...", flush=True)
+        print(f"[{site.name}] 刷新页面...", flush=True)
         driver.refresh()
-        time.sleep(5)  # 增加等待时间
+        time.sleep(5)
 
         # 带上登录态后可能再次遇到挑战，这里等待通过后再交给后续任务
         if not wait_for_cloudflare(driver):
-            print("Cloudflare 挑战未通过，后续操作很可能失败", flush=True)
+            print(f"[{site.name}] Cloudflare 挑战未通过，后续操作很可能失败")
 
-        return driver
+        return True
 
     except Exception as e:
-        print(f"设置浏览器和Cookie时出错: {str(e)}")
-        print("详细错误信息:")
+        print(f"[{site.name}] 设置Cookie时出错: {str(e)}")
         print(traceback.format_exc())
-        return None
+        return False
 
-def nodeseek_comment(driver):
+
+def setup_driver_and_cookies(site):
     """
-    在交易区随机帖子下评论并尝试加鸡腿
+    向后兼容的封装：初始化浏览器并为指定站点注入 cookie。
+    返回 driver 实例（成功）或 None（失败）。
+    """
+    driver = create_driver()
+    if not driver:
+        return None
+    if not inject_site_cookies(driver, site):
+        driver.quit()
+        return None
+    return driver
+
+
+def nodeseek_comment(driver, site):
+    """
+    在指定站点交易区随机帖子下评论并尝试加鸡腿
     返回: {"total": int, "commented": int, "chicken_leg": bool, "error": str}
     """
     stats = {"total": 0, "commented": 0, "chicken_leg": False, "error": ""}
     try:
-        print("正在访问交易区...")
-        target_url = 'https://www.nodeseek.com/categories/trade'
-        driver.get(target_url)
+        print(f"[{site.name}] 正在访问交易区...")
+        driver.get(site.trade_url)
         print("等待页面加载...")
         
         # 获取初始帖子列表
@@ -589,36 +667,47 @@ def nodeseek_comment(driver):
     return stats
 
 
-def build_notify_content(sign_result, comment_stats, account_summary=None):
-    """把签到与评论结果拼成通知正文（纯文本，各渠道通用）。"""
-    lines = [
-        f"执行时间: {time.strftime('%Y-%m-%d %H:%M:%S')}",
-        f"签到结果: {sign_result['detail']}",
-    ]
+def build_notify_content(site_results):
+    """
+    把各站点签到结果拼成通知正文（纯文本，各渠道通用）。
 
-    # 账号概览：等级、总鸡腿数等。抓取失败或缺字段时跳过对应行，不影响其余
-    if account_summary:
-        if account_summary.get('level'):
-            lines.append(f"当前等级: Lv {account_summary['level']}")
-        if account_summary.get('chicken_leg'):
-            lines.append(f"总鸡腿数: {account_summary['chicken_leg']}")
-        if account_summary.get('comment'):
-            lines.append(f"评论数: {account_summary['comment']}")
-        if account_summary.get('topic'):
-            lines.append(f"主题贴数: {account_summary['topic']}")
+    site_results: [(site, sign_result, comment_stats, account_summary), ...]
+    单站点时仍按原排版输出，多站点时每站一段、用分隔线隔开。
+    """
+    lines = [f"执行时间: {time.strftime('%Y-%m-%d %H:%M:%S')}"]
 
-    # 附加任务被开关关闭时只说明状态，不输出无意义的 0/0 统计
-    if comment_stats is None:
-        lines.append("附加任务: 已关闭（NS_EXTRA_TASKS 未开启）")
-        return "\n".join(lines)
+    def render_site(site, sign_result, comment_stats, account_summary, header):
+        block = [header, f"签到结果: {sign_result['detail']}"]
 
-    if comment_stats["error"]:
-        lines.append(f"评论任务: 异常终止（{comment_stats['error']}）")
-    else:
-        lines.append(
-            f"评论任务: 成功 {comment_stats['commented']}/{comment_stats['total']} 个帖子"
-        )
-    lines.append(f"加鸡腿: {'成功' if comment_stats['chicken_leg'] else '未成功'}")
+        if account_summary:
+            if account_summary.get('level'):
+                block.append(f"当前等级: Lv {account_summary['level']}")
+            if account_summary.get('chicken_leg'):
+                block.append(f"总鸡腿数: {account_summary['chicken_leg']}")
+            if account_summary.get('comment'):
+                block.append(f"评论数: {account_summary['comment']}")
+            if account_summary.get('topic'):
+                block.append(f"主题贴数: {account_summary['topic']}")
+
+        # 附加任务被开关关闭时只说明状态，不输出无意义的 0/0 统计
+        if comment_stats is None:
+            block.append("附加任务: 已关闭（NS_EXTRA_TASKS 未开启）")
+            return block
+
+        if comment_stats["error"]:
+            block.append(f"评论任务: 异常终止（{comment_stats['error']}）")
+        else:
+            block.append(
+                f"评论任务: 成功 {comment_stats['commented']}/{comment_stats['total']} 个帖子"
+            )
+        block.append(f"加鸡腿: {'成功' if comment_stats['chicken_leg'] else '未成功'}")
+        return block
+
+    for index, (site, sign_result, comment_stats, account_summary) in enumerate(site_results):
+        if index > 0:
+            lines.append("")  # 站点间空行分隔
+        lines.extend(render_site(site, sign_result, comment_stats, account_summary, f"【{site.name}】"))
+
     return "\n".join(lines)
 
 def click_chicken_leg(driver):
@@ -667,36 +756,64 @@ def click_chicken_leg(driver):
 def run():
     """
     执行每日任务并推送通知。
-    返回进程退出码：0 表示签到成功，1 表示浏览器初始化失败或签到失败。
+    遍历所有已配置站点（NodeSeek、DeepFlood 等），每站独立注入 cookie、签到、抓概览，
+    多站点间插入随机延迟降低被风控判为批量行为的概率，最后合并成一条通知。
+    返回进程退出码：全部签到成功为 0，否则为 1。
     """
-    print("开始执行NodeSeek每日任务...")
-    driver = setup_driver_and_cookies()
-    if not driver:
-        print("浏览器初始化失败")
-        # 初始化失败同样推送通知，避免任务静默中断
-        notify.send("NodeSeek 每日任务失败", "浏览器初始化失败，请检查 NS_COOKIE 配置与运行环境")
+    print("开始执行每日任务...")
+    sites = load_sites()
+    if not sites:
+        notify.send("每日任务失败", "未配置任何站点 cookie（至少需要 NS_COOKIE）")
         return 1
 
-    # 评论与加鸡腿受 NS_EXTRA_TASKS 控制，关闭时只执行签到
-    if extra_tasks_enabled:
-        print("NS_EXTRA_TASKS 已开启，执行评论与加鸡腿任务")
-        comment_stats = nodeseek_comment(driver)
-    else:
-        print("NS_EXTRA_TASKS 未开启，跳过评论与加鸡腿任务，仅执行签到")
-        comment_stats = None
+    # 多站点共用同一个浏览器实例，避免重复启动 Chrome
+    driver = create_driver()
+    if not driver:
+        print("浏览器初始化失败")
+        notify.send("每日任务失败", "浏览器初始化失败，请检查运行环境")
+        return 1
 
-    sign_result = click_sign_icon(driver)
+    site_results = []
+    for index, site in enumerate(sites):
+        # 第二站及以后先随机延迟，再开始注入。延迟在前可以拉开两站操作的时间间隔
+        if index > 0:
+            gap = random.randint(SITE_GAP_MIN, SITE_GAP_MAX)
+            print(f"[{site.name}] 等待 {gap} 秒后再开始，避免连续签到被风控")
+            time.sleep(gap)
 
-    # 签到完成后顺带抓取账号概览（等级、总鸡腿数等），加入通知正文。
-    # 无论签到成功与否都尝试抓取——失败时也能在通知里看到当前状态。
-    print("抓取账号概览...")
-    account_summary = fetch_account_summary(driver)
+        print(f"=== 处理 {site.name}（{site.domain}）===")
+        if not inject_site_cookies(driver, site):
+            # cookie 注入失败也要纳入结果，让通知体现这一站异常
+            site_results.append((site, {"success": False, "detail": "cookie 注入失败"}, None, {}))
+            continue
+
+        # 评论与加鸡腿受 NS_EXTRA_TASKS 控制，关闭时只执行签到
+        if extra_tasks_enabled:
+            print(f"[{site.name}] NS_EXTRA_TASKS 已开启，执行评论与加鸡腿任务")
+            comment_stats = nodeseek_comment(driver, site)
+        else:
+            print(f"[{site.name}] NS_EXTRA_TASKS 未开启，仅执行签到")
+            comment_stats = None
+
+        sign_result = click_sign_icon(driver, site)
+
+        # 签到完成后顺带抓取账号概览，失败时也能在通知里看到当前状态
+        print(f"[{site.name}] 抓取账号概览...")
+        account_summary = fetch_account_summary(driver, site)
+
+        site_results.append((site, sign_result, comment_stats, account_summary))
+
+    try:
+        driver.quit()
+    except Exception:
+        pass
 
     print("脚本执行完成")
 
-    title = "NodeSeek 每日任务" + ("" if sign_result["success"] else "（签到异常）")
-    notify.send(title, build_notify_content(sign_result, comment_stats, account_summary))
-    return 0 if sign_result["success"] else 1
+    all_success = all(r[1]["success"] for r in site_results)
+    title = "NodeSeek 每日任务" + ("" if all_success else "（签到异常）")
+    notify.send(title, build_notify_content(site_results))
+    return 0 if all_success else 1
 
 
 def main():

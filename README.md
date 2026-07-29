@@ -24,8 +24,18 @@
 - `NS_RANDOM`: 是否随机选择奖励，true/false（可选，默认 false）
 - `HEADLESS`: 是否使用无头模式，true/false（可选，默认 true）
 - `NS_EXTRA_TASKS`: 除签到外的任务（评论、加鸡腿）总开关，true/false（可选，**默认 false**）
+- `DEEPFLOOD_COOKIE`: DeepFlood 子站的 Cookie（可选）。配置后会自动追加签到第二站；两站用同一套代码、同样页面结构，仅域名与 cookie 不同
+- `SITE_GAP_MIN` / `SITE_GAP_MAX`: 两站签到之间的随机延迟范围（秒，可选，默认 60-180），降低连续签到被风控的概率
 
 布尔类型变量接受 `true`/`1`/`yes`/`on`/`y`（大小写不敏感）为真，其余值一律为假。
+
+### 关于多站点签到
+
+DeepFlood 是 NodeSeek 的子站，同一套论坛代码、同样的页面结构，只是独立域名与独立登录态。配置 `DEEPFLOOD_COOKIE` 后：
+
+- 两站共用同一个浏览器实例，各自注入自己的 cookie 后签到，互不干扰
+- 第二站开始前会先随机等待 `SITE_GAP_MIN`~`SITE_GAP_MAX` 秒，避免两次签到紧挨着被判定为机器批量行为
+- 通知按站点分段显示，各带自己的等级与鸡腿数
 
 ### 关于 NS_EXTRA_TASKS
 
