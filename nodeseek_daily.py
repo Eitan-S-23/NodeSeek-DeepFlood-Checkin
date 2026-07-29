@@ -11,6 +11,8 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 import random
 import re
+import shutil
+import subprocess
 import time
 import traceback
 import undetected_chromedriver as uc
@@ -50,6 +52,49 @@ def should_skip_cookie(name):
     """判断某个 cookie 是否应跳过注入（大小写不敏感的前缀匹配）。"""
     lowered = name.strip().lower()
     return any(lowered.startswith(prefix) for prefix in SKIP_COOKIE_PREFIXES)
+
+
+def parse_chrome_major_version(version_output):
+    """
+    从 `chrome --version` 的输出中解析大版本号。
+    输入形如 "Google Chrome 150.0.7871.128"，返回 150；无法解析时返回 None。
+    """
+    if not version_output:
+        return None
+    match = re.search(r'(\d+)\.\d+\.\d+', version_output)
+    return int(match.group(1)) if match else None
+
+
+def detect_chrome_major_version():
+    """
+    探测本机已安装 Chrome 的大版本号，用于让驱动版本与浏览器保持一致。
+    允许通过 CHROME_MAJOR_VERSION 直接指定，便于在版本探测失败时人工兜底。
+    探测失败返回 None，由调用方回退到自动匹配。
+    """
+    override = os.environ.get("CHROME_MAJOR_VERSION", "").strip()
+    if override.isdigit():
+        return int(override)
+
+    for binary in ("google-chrome", "chromium-browser", "chromium", "chrome"):
+        executable = shutil.which(binary)
+        if not executable:
+            continue
+        try:
+            output = subprocess.run(
+                [executable, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            ).stdout
+        except Exception as e:
+            print(f"探测 {binary} 版本失败: {str(e)}")
+            continue
+
+        version = parse_chrome_major_version(output)
+        if version:
+            return version
+
+    return None
 
 
 ns_random = env_bool("NS_RANDOM")
@@ -174,8 +219,16 @@ def setup_driver_and_cookies():
             # 反而会成为 Cloudflare 的识别特征。让 undetected-chromedriver 使用真实 UA。
         
         print("正在启动Chrome...")
-        driver = uc.Chrome(options=options)
-        
+        # undetected-chromedriver 默认下载最新版驱动，而 runner 预装的 Chrome 往往落后一个大版本，
+        # 二者不匹配会直接抛 SessionNotCreatedException。显式传入实际大版本号强制取匹配的驱动。
+        version_main = detect_chrome_major_version()
+        if version_main:
+            print(f"检测到 Chrome 大版本: {version_main}，将使用匹配的驱动")
+            driver = uc.Chrome(options=options, version_main=version_main)
+        else:
+            print("未能检测到 Chrome 版本，回退为自动匹配")
+            driver = uc.Chrome(options=options)
+
         if headless:
             # 执行 JavaScript 来修改 webdriver 标记
             driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")

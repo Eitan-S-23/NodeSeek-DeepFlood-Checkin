@@ -74,6 +74,27 @@ class EnvBoolTestCase(unittest.TestCase):
             self.assertTrue(daily.env_bool("NS_TEST_FLAG", default=True))
 
 
+class ChromeVersionTestCase(unittest.TestCase):
+    """校验 Chrome 大版本解析，驱动版本必须与浏览器一致否则无法建立会话。"""
+
+    def test_解析标准版本输出(self):
+        self.assertEqual(daily.parse_chrome_major_version("Google Chrome 150.0.7871.128"), 150)
+        self.assertEqual(daily.parse_chrome_major_version("Chromium 151.0.1.2"), 151)
+
+    def test_无法解析时返回None(self):
+        for raw in ("", None, "no version here"):
+            self.assertIsNone(daily.parse_chrome_major_version(raw), f"{raw!r} 应返回 None")
+
+    def test_环境变量可覆盖探测结果(self):
+        with mock.patch.dict("os.environ", {"CHROME_MAJOR_VERSION": "149"}):
+            self.assertEqual(daily.detect_chrome_major_version(), 149)
+
+    def test_环境变量非数字时忽略并继续探测(self):
+        with mock.patch.dict("os.environ", {"CHROME_MAJOR_VERSION": "abc"}), \
+                mock.patch("shutil.which", return_value=None):
+            self.assertIsNone(daily.detect_chrome_major_version())
+
+
 class BuildNotifyContentTestCase(unittest.TestCase):
     """校验通知正文在三种结果下的表述。"""
 
