@@ -12,6 +12,10 @@ on:
 jobs:
   run-nodeseek-daily:
     runs-on: ubuntu-latest
+    # 设定时区为北京时间，使脚本内 time.localtime/strftime 输出 UTC+8，
+    # 通知里的"执行时间"不再显示 UTC，与签到自然日对齐。
+    env:
+      TZ: Asia/Shanghai
 
     steps:
       - name: Checkout repository
