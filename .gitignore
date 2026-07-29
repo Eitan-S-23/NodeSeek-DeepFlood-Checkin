@@ -4,4 +4,6 @@
 
 # 本地凭据文件，含真实 session，禁止提交
 /cookie.txt
+# .env 用于本地调试填真实凭据，不入库；仓库只保留 .env.example 作模板
+/.env
 /.env.local
