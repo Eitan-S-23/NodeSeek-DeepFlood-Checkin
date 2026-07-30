@@ -9,6 +9,9 @@ import time
 import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
 
+# 复用主脚本的 Chrome 版本探测，避免驱动与浏览器版本不匹配
+from nodeseek_daily import detect_chrome_major_version
+
 
 def probe():
     options = uc.ChromeOptions()
@@ -17,7 +20,12 @@ def probe():
     options.add_argument('--disable-blink-features=AutomationControlled')
     options.add_argument('--window-size=1920,1080')
     # 有头模式配合 xvfb，过 Cloudflare 概率更高
-    driver = uc.Chrome(options=options)
+    version_main = detect_chrome_major_version()
+    if version_main:
+        print(f"检测到 Chrome 大版本: {version_main}", flush=True)
+        driver = uc.Chrome(options=options, version_main=version_main)
+    else:
+        driver = uc.Chrome(options=options)
     driver.execute_script(
         "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
     )
