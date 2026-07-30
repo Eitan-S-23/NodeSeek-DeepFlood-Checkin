@@ -22,7 +22,7 @@
 
 - `NS_COOKIE`: NodeSeek 的 Cookie（必需）
 - `NS_RANDOM`: 是否随机选择奖励，true/false（可选，默认 false）
-- `HEADLESS`: 是否使用无头模式，true/false（可选，默认 true）
+- `HEADLESS`: 是否使用无头模式，true/false（可选，默认 true）。**注意 GitHub Actions 中需用有头模式（`false`）配合 xvfb 才能通过 Cloudflare 挑战**，workflow 已硬编码为 `false`，本地无显示环境时可用 `true`
 - `NS_EXTRA_TASKS`: 除签到外的任务（评论、加鸡腿）总开关，true/false（可选，**默认 false**）
 - `DEEPFLOOD_COOKIE`: DeepFlood 子站的 Cookie（可选）。配置后会自动追加签到第二站；两站用同一套代码、同样页面结构，仅域名与 cookie 不同
 - `SITE_GAP_MIN` / `SITE_GAP_MAX`: 两站签到之间的随机延迟范围（秒，可选，默认 60-180），降低连续签到被风控的概率
@@ -66,26 +66,32 @@ Telegram：
 - `WECOM_AGENTID`: 应用的 AgentId
 - `WECOM_TOUSER`: 接收成员（可选，默认 `@all`）
 
-通知内容示例（`NS_EXTRA_TASKS=true`）：
+通知内容示例（多站签到，实际推送格式）：
 
 ```
 NodeSeek 每日任务
 
-执行时间: 2026-07-29 08:05:12
-签到结果: 签到成功，获得 5 个鸡腿
-评论任务: 成功 18/20 个帖子
-加鸡腿: 成功
-```
+执行时间: 2026-07-30 08:00:12
+【NodeSeek】
+执行时间: 2026-07-30 08:00:15
+签到结果: 签到成功，今天的签到收益是6个鸡腿 OK
+当前等级: Lv 1
+总鸡腿数: 124
+评论数: 4
+附加任务: 已关闭（NS_EXTRA_TASKS 未开启）
 
-只签到时（默认）：
-
-```
-NodeSeek 每日任务
-
-执行时间: 2026-07-29 08:05:12
-签到结果: 签到成功，获得 5 个鸡腿
+【DeepFlood】
+执行时间: 2026-07-30 08:02:08
+签到结果: 签到成功，今天的签到收益是5个鸡腿 OK
+当前等级: Lv 0
+总鸡腿数: 98
+评论数: 0
 附加任务: 已关闭（NS_EXTRA_TASKS 未开启）
 ```
+
+顶部"执行时间"为任务启动时刻，各站段首的"执行时间"为该站签到开始时刻，两者的差值即两站间的随机延迟。
+
+只配置单站时，通知只有【NodeSeek】一段，格式相同。
 
 ## 本地运行
 
