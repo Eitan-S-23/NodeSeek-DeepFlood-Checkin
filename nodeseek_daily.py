@@ -334,8 +334,9 @@ def fetch_account_summary(driver, site):
                 summary[key] = match.group(1)
 
         if not summary:
-            # 一项都没抓到时打印片段，便于排查页面结构变化，不包含敏感信息
-            print(f"[{site.name}] 未抓到任何账号概览字段，页面文本片段: {text[:300]}")
+            # 只报告抓取失败，不 dump 页面文本：主页文本可能含用户名等个人信息，
+            # 公开仓库的 Actions 日志全网可见，不应把整段文本写进日志
+            print(f"[{site.name}] 未抓到任何账号概览字段，可能页面结构已变化")
     except Exception as e:
         print(f"[{site.name}] 抓取账号概览失败: {str(e)}")
     return summary
@@ -421,8 +422,9 @@ def click_sign_icon(driver, site):
                 print("页面显示今日已签到", flush=True)
                 return {"success": True, "detail": "今日已签到"}
             # 既无按钮又无已签到文案，属于异常状态，如实报失败而非静默成功
+            # 不打印页面源码：公开仓库日志全网可见，登录态页面源码可能含个人信息
             try:
-                print(f"当前页面源码片段: {driver.page_source[:500]}...", flush=True)
+                print(f"当前页面URL: {driver.current_url}", flush=True)
             except Exception:
                 pass
             return {"success": False, "detail": f"签到失败: 未找到领取按钮（{button_text}），且页面无已签到标志"}
@@ -449,10 +451,7 @@ def click_sign_icon(driver, site):
             print("点击后页面显示已签到", flush=True)
             return {"success": True, "detail": "签到成功"}
 
-        try:
-            print(f"点击后未能确认结果，页面源码片段: {driver.page_source[:500]}...", flush=True)
-        except Exception:
-            pass
+        # 点击后未确认到成功，如实报失败。不打印页面源码避免个人信息进公开日志
         return {"success": False, "detail": "签到失败: 已点击领取按钮但未能确认签到结果"}
 
     except Exception as e:
@@ -465,10 +464,7 @@ def click_sign_icon(driver, site):
             print(f"当前页面URL: {driver.current_url}", flush=True)
         except Exception:
             pass
-        try:
-            print(f"当前页面源码片段: {driver.page_source[:500]}...", flush=True)
-        except Exception:
-            pass
+        # 不打印页面源码：公开仓库日志全网可见，登录态页面源码可能含用户名等个人信息
         print("详细错误信息:", flush=True)
         traceback.print_exc()
         return {"success": False, "detail": f"签到失败: {type(e).__name__} {str(e)}"}
