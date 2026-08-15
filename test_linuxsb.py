@@ -88,14 +88,15 @@ class SignInAccountTestCase(unittest.TestCase):
 
     def test_未签到进入post并成功(self):
         with fake_get(PAGE_UNCHECKED), fake_post({"ok": 1, "message": "签到成功"}):
-            success, summary = daily.sign_in_account("a=1")
+            success, summary, username = daily.sign_in_account("a=1")
         self.assertTrue(success)
         self.assertIn("签到结果: 签到成功（签到成功）", summary)
+        self.assertIsNone(username)  # 测试页面无用户名链接
 
     def test_已签到跳过post(self):
         with fake_get(PAGE_CHECKED) as get_mock, \
              mock.patch.object(daily.requests, "post") as post_mock:
-            success, summary = daily.sign_in_account("a=1")
+            success, summary, _ = daily.sign_in_account("a=1")
         self.assertTrue(success)
         self.assertIn("今日已签到", summary)
         get_mock.assert_called()
@@ -103,7 +104,7 @@ class SignInAccountTestCase(unittest.TestCase):
 
     def test_cookie失效给出明确提示(self):
         with fake_get("<html>log in</html>"):
-            success, summary = daily.sign_in_account("bad=1")
+            success, summary, _ = daily.sign_in_account("bad=1")
         self.assertFalse(success)
         self.assertIn("Cookie 已失效", summary)
 
@@ -112,7 +113,7 @@ class SignInAccountTestCase(unittest.TestCase):
         page = '<html><body><button>每日签到</button></body></html>'
         with fake_get(page), \
              fake_post({"ok": 1, "message": "签到成功"}) as post_mock:
-            success, summary = daily.sign_in_account("bbs_auth=abc; bbs_csrf=cookiecsrf123")
+            success, summary, _ = daily.sign_in_account("bbs_auth=abc; bbs_csrf=cookiecsrf123")
         self.assertTrue(success)
         self.assertIn("签到成功", summary)
         # POST 携带的 _csrf 来自 cookie 中的 bbs_csrf
@@ -123,7 +124,7 @@ class SignInAccountTestCase(unittest.TestCase):
         """服务端以 ok:0 + 已打卡/重复签到 返回时，视为当日已签到而非失败"""
         with fake_get(PAGE_UNCHECKED), \
              fake_post({"ok": 0, "message": "今日已打卡，请明天再来"}):
-            success, summary = daily.sign_in_account("a=1")
+            success, summary, _ = daily.sign_in_account("a=1")
         self.assertTrue(success)
         self.assertIn("无需重复签到", summary)
 
@@ -131,7 +132,7 @@ class SignInAccountTestCase(unittest.TestCase):
         """ok:1 响应中的积分等字段一并展示（不同站点版本字段名不同）"""
         with fake_get(PAGE_UNCHECKED), \
              fake_post({"ok": 1, "message": "", "bonus": 10, "balance": 888}):
-            success, summary = daily.sign_in_account("a=1")
+            success, summary, _ = daily.sign_in_account("a=1")
         self.assertTrue(success)
         self.assertIn("bonus: 10", summary)
         self.assertIn("balance: 888", summary)
@@ -147,18 +148,74 @@ class ExtractCheckinMetaTestCase(unittest.TestCase):
         self.assertEqual(found.get("当前积分"), "1,234")
         self.assertEqual(found.get("连续签到"), "5 天")
 
-    def test_标签与注释不影响提取(self):
-        html = ('<!-- 积分:9999 --><p><b>积分</b> ： 88</p>')
+    def test_词与冒号间有空格的积分也可提取(self):
+        html = '<div>积分 ： 88</div>'
         found = dict(daily.extract_checkin_meta(html))
-        # 注释里的数字应被忽略，取可见文本中的 88
         self.assertEqual(found.get("积分"), "88")
 
     def test_无积分信息时返回空(self):
         self.assertEqual(daily.extract_checkin_meta("<html>请先登录</html>"), [])
 
+    def test_噪音词不误匹配积分(self):
+        """「积分规则」「获得积分 +10」等不应被当作当前积分"""
+        html = ('<div>积分规则：每日签到可获得积分</div>'
+                '<div>获得积分 +10</div><div>当前积分：888</div>')
+        found = dict(daily.extract_checkin_meta(html))
+        self.assertEqual(found.get("当前积分"), "888")
+        self.assertNotIn("积分", found)  # 命中了「当前积分」就不应再有重复的「积分」行
+
+    def test_当前积分优先于积分字段(self):
+        html = '<div>积分：123</div><div>当前积分：456</div>'
+        found = dict(daily.extract_checkin_meta(html))
+        self.assertEqual(found.get("当前积分"), "456")
+        self.assertNotIn("积分", found)
+
+
+class ExtractUsernameTestCase(unittest.TestCase):
+    """用户名解析测试"""
+
+    def test_从用户链接提取用户名(self):
+        html = ('<a href="/user/42">小明同学</a>'
+                '<span>每日签到</span>')
+        self.assertEqual(daily.extract_username(html), "小明同学")
+
+    def test_无用户链接时返回None(self):
+        self.assertIsNone(daily.extract_username("<html>请先登录</html>"))
+
+
+class ExtractUsernameRunTestCase(unittest.TestCase):
+    """通知中账号标识测试：使用用户名，绝不暴露 cookie 内容"""
+
+    def setUp(self):
+        # 与 RunTestCase 一致：屏蔽 run() 签到的 SITE_GAP 随机延迟
+        self.sleep_mock = mock.patch.object(daily.time, "sleep").start()
+        self.addCleanup(mock.patch.stopall)
+
+    def tearDown(self):
+        import os
+
+        os.environ.pop("LINUXSB_COOKIE", None)
+
+    def test_通知使用用户名而非cookie键名(self):
+        import os
+
+        os.environ["LINUXSB_COOKIE"] = "bbs_auth=abc; bbs_csrf=csrf123"
+        page = ('<a href="/user/42">小明同学</a>'
+                '<div>当前积分：888</div>'
+                '<input type="hidden" name="_csrf" value="abc">')
+        with fake_get(page), fake_post({"ok": 1, "message": "好"}), \
+             mock.patch.object(daily.notify, "send") as send_mock:
+            code = daily.run()
+        self.assertEqual(code, 0)
+        content = send_mock.call_args.args[1]
+        self.assertIn("小明同学", content)
+        # cookie 键名 bbs_auth / bbs_csrf 不进入通知
+        self.assertNotIn("bbs_auth", content)
+        self.assertNotIn("bbs_csrf", content)
+
     def test_服务端拒绝时返回失败不抛异常(self):
         with fake_get(PAGE_UNCHECKED), fake_post({"ok": 0, "message": "请求已过期"}):
-            success, summary = daily.sign_in_account("a=1")
+            success, summary, _ = daily.sign_in_account("a=1")
         self.assertFalse(success)
         self.assertIn("请求已过期", summary)
         self.assertIn("更新 LINUXSB_COOKIE", summary)
@@ -236,7 +293,7 @@ class RunTestCase(unittest.TestCase):
         self.assertIn("【linux.sb】", content)
         self.assertIn("账号 1", content)
         self.assertIn("签到结果: 签到成功", content)
-        self.assertIn("积分: 888", content)
+        self.assertIn("当前积分: 888", content)
         self.assertIn("连续签到: 3 天", content)
 
     def test_签到前有随机延迟(self):
