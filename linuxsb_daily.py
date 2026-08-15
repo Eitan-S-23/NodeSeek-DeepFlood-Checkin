@@ -228,6 +228,7 @@ def browser_sign_in(creds):
         driver_kwargs["version_main"] = version_main
 
     driver = uc.Chrome(options=options, **driver_kwargs)
+    stage = "打开登录页"
     try:
         driver.get(f"{BASE_URL}/login")
         wait = WebDriverWait(driver, 30)
@@ -264,7 +265,9 @@ def browser_sign_in(creds):
         print(f"[linux.sb] 账号密码登录成功（URL {driver.current_url}），开始签到")
 
         # 以同一浏览器会话访问签到页并执行签到
+        stage = "访问签到页"
         driver.get(CHECKIN_URL)
+        stage = "等待签到页 _csrf"
         wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'input[name="_csrf"]')))
         # 保险：签到页仍重定向到登录页说明登录态未生效，明确失败而不匿名假签到
         if "/login" in driver.current_url:
@@ -274,6 +277,8 @@ def browser_sign_in(creds):
         if CHECKED_IN_TEXT in driver.page_source:
             lines.append("签到结果: 今日已签到，无需重复签到")
         else:
+            stage = "执行签到请求（页面内 fetch）"
+            driver.set_script_timeout(20)
             result = driver.execute_async_script(
                 "const done = arguments[arguments.length - 1];"
                 "const csrf = document.querySelector('input[name=\"_csrf\"]').value;"
@@ -296,6 +301,7 @@ def browser_sign_in(creds):
                 return False, f"签到失败：{message}{hint}", None
 
         # 刷新签到页提取用户名/积分/连续签到概览
+        stage = "刷新签到页提取概览"
         driver.refresh()
         wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'input[name="_csrf"]')))
         print(f"[linux.sb] 签到页：URL {driver.current_url}，标题「{driver.title}」")
@@ -312,7 +318,7 @@ def browser_sign_in(creds):
         return True, "\n".join(lines), extract_username(html)
     except Exception as exc:
         # 不打印页面源码：公开仓库日志可见，登录后页面可能含个人字段
-        raise RuntimeError(f"浏览器登录/签到失败：{exc}") from exc
+        raise RuntimeError(f"浏览器登录/签到失败（{stage}）：{exc}") from exc
     finally:
         try:
             driver.quit()
