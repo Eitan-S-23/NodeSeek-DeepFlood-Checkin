@@ -317,8 +317,16 @@ def browser_sign_in(creds):
         print(f"[linux.sb] 浏览器签到完成：{lines[0]}")
         return True, "\n".join(lines), extract_username(html)
     except Exception as exc:
-        # 不打印页面源码：公开仓库日志可见，登录后页面可能含个人字段
-        raise RuntimeError(f"浏览器登录/签到失败（{stage}）：{exc}") from exc
+        # 失败时采集页面快照（已脱敏），便于定位超时/报错时的真实页面形态
+        try:
+            live_url = driver.current_url
+            live_src = driver.page_source or ""
+        except Exception:
+            live_url, live_src = "?", ""
+        print(f"[linux.sb] 失败时页面：URL {live_url}，长度 {len(live_src)}")
+        if live_src:
+            _debug_dump_checkin_area(live_src)
+        raise RuntimeError(f"浏览器登录/签到失败（{stage}、URL {live_url}）：{exc}") from exc
     finally:
         try:
             driver.quit()
