@@ -250,13 +250,16 @@ def browser_sign_in(creds):
         answer_input.send_keys(answer)
 
         # 蜜罐字段 native_captcha_company 保持为空（伪装真人必须留空）
-        submit = driver.find_element(By.CSS_SELECTOR, "form button[type=submit], form button")
+        # 提交按钮必须从密码输入框所在的登录表单内找：登录页顶部还有
+        # .search-form（搜索框，action=/index.php），用全局 form button
+        # 选择器会匹配到搜索按钮——曾因此点击了搜索而非登录，跳到空搜索页
+        # （index.php?field=title&q=）且被误判为登录成功
+        login_form = password_input.find_element(By.XPATH, "ancestor::form[1]")
+        submit = login_form.find_element(By.CSS_SELECTOR, "button[type=submit], button")
         submit.click()
         # 登录成功的可靠特征：登录表单（password 输入框）从页面消失。
-        # 不能依赖 URL 离开 /login 或 user-name 元素——登录失败后可能跳到
-        # 不含 "login" 的地址（如搜索页），而未登录的搜索/榜单页也含
-        # user-name 站点用户卡，两种特征都会把失败误判为成功，导致随后的
-        # 匿名 POST 被服务端以 ok:1 假成功回应
+        # 该站登录表单只在 /login 呈现，登录成功后其他页面不再有密码输入框；
+        # 登录失败停留在 /login（表单恒在）会在此超时并明确报错
         wait.until(lambda d: 'name="password"' not in (d.page_source or ""))
         print(f"[linux.sb] 账号密码登录成功（URL {driver.current_url}），开始签到")
 
