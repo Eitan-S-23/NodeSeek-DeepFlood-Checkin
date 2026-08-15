@@ -288,8 +288,12 @@ def browser_sign_in(creds):
         driver.refresh()
         wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'input[name="_csrf"]')))
         html = driver.page_source
-        for label, value in extract_checkin_meta(html):
+        meta = extract_checkin_meta(html)
+        for label, value in meta:
             lines.append(f"{label}: {value}")
+        # 概览提取落空时输出脱敏页面片段，便于按真实 DOM 结构校准提取
+        if not meta:
+            _debug_dump_checkin_area(html)
         if len(lines) == 1:
             lines.append("概览信息: 未从页面取到（模板差异或页面权限不足）")
         print(f"[linux.sb] 浏览器签到完成：{lines[0]}")
