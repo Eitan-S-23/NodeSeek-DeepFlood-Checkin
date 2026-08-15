@@ -361,20 +361,26 @@ def extract_username(html):
 
 def _debug_dump_checkin_area(html):
     """
-    调试辅助：LINUXSB_DEBUG=1 时打印「当前积分」附近的页面片段（已脱敏），
-    便于按实际页面结构调整用户名/积分解析正则。
+    调试辅助：打印「当前积分」附近的页面片段（已脱敏），便于按实际页面结构
+    调整用户名/积分解析正则。LINUXSB_DEBUG=1 时输出；概览提取全部落空时自动输出。
     """
-    if os.getenv("LINUXSB_DEBUG", "") != "1":
-        return
-    for keyword in ("当前积分", "积分"):
+    def redact(segment):
+        segment = re.sub(r'name="_csrf"\s+value="[^"]*"', 'name="_csrf" value="***"', segment)
+        # 用户名等个人字段打码，避免落入公开仓库日志
+        segment = re.sub(r'(user-name[^>]*>)[^<]+', r'\1***', segment)
+        segment = re.sub(r'(href="/user/\d+"[^>]*>)[^<]+', r'\1***', segment)
+        return segment
+
+    segment = None
+    for keyword in ("当前积分", "积分", "签到"):
         pos = html.find(keyword)
         if pos != -1:
             start = max(0, pos - 250)
             segment = html[start:pos + 120]
-            # 脱敏：CSRF token 与 cookie 相关值不落入日志
-            segment = re.sub(r'name="_csrf"\s+value="[^"]*"', 'name="_csrf" value="***"', segment)
-            print(f"[linux.sb][debug] {keyword} 附近页面片段：\n{segment}")
             break
+    if segment is None:
+        segment = html[:700]
+    print(f"[linux.sb][debug] 页面片段：\n{redact(segment)}")
 
 
 def sign_in_account(cookie):
@@ -451,10 +457,19 @@ def _build_summary(lines, cookie):
 
     username = None
     if html:
+        # 每次运行输出一行页面概要（无敏感信息），便于核对登录态页面形态
+        title_match = re.search(r"<title>([^<]*)</title>", html)
+        title = title_match.group(1).strip() if title_match else "?"
+        print(f"[linux.sb] 概览页: HTTP {status}，URL {final_url}，标题「{title}」，长度 {len(html)}")
         username = extract_username(html)
-        for label, value in extract_checkin_meta(html):
+        meta = extract_checkin_meta(html)
+        for label, value in meta:
             lines.append(f"{label}: {value}")
-        _debug_dump_checkin_area(html)
+        # 提取全部落空时自动输出脱敏片段，方便直接定位页面结构
+        if not meta:
+            _debug_dump_checkin_area(html)
+        elif os.getenv("LINUXSB_DEBUG", "") == "1":
+            _debug_dump_checkin_area(html)
     else:
         # 拿不到概览时把真实原因写进日志，方便定位（公开日志不含敏感信息）
         location = f"，最终 URL {final_url}" if final_url else ""
