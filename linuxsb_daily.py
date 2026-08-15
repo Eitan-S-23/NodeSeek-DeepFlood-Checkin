@@ -192,14 +192,16 @@ def detect_chrome_major_version():
     return None
 
 
-def browser_login(creds):
+def browser_sign_in(creds):
     """
-    用浏览器自动登录 linux.sb，返回登录后的完整 Cookie 字符串。
+    账号密码兜底登录并就地签到，返回 (成功与否, 结果摘要, 用户名或 None)。
 
-    登录页的三道验证均由页面自身完成大半：校验码 PoW 由前端 JS 计算，
-    脚本只需填写算术题答案（题面可解析计算）并保持蜜罐字段为空。
-    浏览器库（selenium/undetected_chromedriver 等）函数内局部导入，
-    保证未安装浏览器依赖时纯 requests 签到仍可正常使用。
+    与 requests 签到路径的区别：登录成功后在同一个浏览器会话内直接访问
+    签到页，并用页面内 fetch 发起签到 POST——不经过 cookie 导出/拼接/重发
+    环节，登录态天然一致（此前多次尝试 cookie 导出到 requests 均无法复现
+    登录态，故放弃该路线）。算术题验证码由脚本解析填写，PoW 由页面 JS 计算。
+    浏览器库（selenium/undetected_chromedriver 等）函数内局部导入，保证未
+    安装浏览器依赖时纯 requests 签到仍可正常使用。
     """
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
@@ -248,53 +250,58 @@ def browser_login(creds):
         answer_input.send_keys(answer)
 
         # 蜜罐字段 native_captcha_company 保持为空（伪装真人必须留空）
-        # 点击登录并等待跳转（登录成功会离开 /login 页面）
         submit = driver.find_element(By.CSS_SELECTOR, "form button[type=submit], form button")
         submit.click()
+        # 登录成功会离开 /login 页面（登录失败停留在 /login 会在此超时）
         wait.until(lambda d: "login" not in d.current_url)
 
-        # 只导出当前站点域的 cookie：get_cookies() 会返回全部域名（含 CDN、
-        # 统计等其他域的同名 cookie），一并注入 requests 会互相覆盖导致登录态丢失
-        host = BASE_URL.split("://", 1)[1]
-        cookies = [
-            c for c in driver.get_cookies()
-            if c.get("domain", "").lstrip(".").endswith(host)
-        ]
-        if not cookies:
-            raise RuntimeError("登录后未取到任何 Cookie，可能登录被防爬拦截")
-        cookie_str = "; ".join(f"{c['name']}={c['value']}" for c in cookies)
-        return cookie_str
+        # 以同一浏览器会话访问签到页并执行签到
+        driver.get(CHECKIN_URL)
+        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'input[name="_csrf"]')))
+
+        lines = []
+        if CHECKED_IN_TEXT in driver.page_source:
+            lines.append("签到结果: 今日已签到，无需重复签到")
+        else:
+            result = driver.execute_async_script(
+                "const done = arguments[arguments.length - 1];"
+                "const csrf = document.querySelector('input[name=\"_csrf\"]').value;"
+                "fetch('/daily_checkin', {"
+                "  method: 'POST',"
+                "  headers: {"
+                "    'Content-Type': 'application/x-www-form-urlencoded',"
+                "    'X-Requested-With': 'XMLHttpRequest'"
+                "  },"
+                "  body: '_csrf=' + encodeURIComponent(csrf)"
+                "}).then(r => r.json()).then(done).catch(e => done({ok: 0, message: String(e)}));"
+            )
+            message = result.get("message", "") or ""
+            if result.get("ok") in (1, True, "1", "true"):
+                lines.append(f"签到结果: 签到成功{f'（{message}）' if message else ''}")
+            elif any(word in message for word in ("已签到", "已打卡", "重复签到")):
+                lines.append(f"签到结果: 今日已签到，无需重复签到（服务端：{message}）")
+            else:
+                hint = "（Cookie 可能已失效，请重新登录 linux.sb）" if "过期" in message else ""
+                return False, f"签到失败：{message}{hint}", None
+
+        # 刷新签到页提取用户名/积分/连续签到概览
+        driver.refresh()
+        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'input[name="_csrf"]')))
+        html = driver.page_source
+        for label, value in extract_checkin_meta(html):
+            lines.append(f"{label}: {value}")
+        if len(lines) == 1:
+            lines.append("概览信息: 未从页面取到（模板差异或页面权限不足）")
+        print(f"[linux.sb] 浏览器签到完成：{lines[0]}")
+        return True, "\n".join(lines), extract_username(html)
     except Exception as exc:
         # 不打印页面源码：公开仓库日志可见，登录后页面可能含个人字段
-        raise RuntimeError(f"浏览器登录失败：{exc}") from exc
+        raise RuntimeError(f"浏览器登录/签到失败：{exc}") from exc
     finally:
         try:
             driver.quit()
         except Exception:
             pass
-
-
-def ensure_valid_cookie(raw_cookie, creds):
-    """
-    Cookie 优先：现有 Cookie 有效则原样返回。
-    Cookie 无效或未配置、且提供了账号密码时，用浏览器登录替换并返回新 Cookie；
-    无可替代凭据时返回原值（走原签到流程，由后续步骤给出失效提示）。
-    """
-    if raw_cookie:
-        csrf, _checked_in, _is_login = fetch_checkin_state(raw_cookie)
-        if csrf is not None:
-            return raw_cookie
-        if creds:
-            print("[linux.sb] Cookie 已失效，尝试用账号密码重新登录")
-            new_cookie = browser_login(creds)
-            print("[linux.sb] 账号密码登录成功，已取得新 Cookie")
-            return new_cookie
-        return raw_cookie
-
-    if creds:
-        print("[linux.sb] 未配置 LINUXSB_COOKIE，使用账号密码登录")
-        return browser_login(creds)
-    return None
 
 
 def fetch_checkin_state(cookie):
@@ -565,19 +572,27 @@ def run():
         # 记录本账号开始签到的时间，写入通知，便于核对执行时点
         started_at = time.strftime("%Y-%m-%d %H:%M:%S")
         try:
-            effective = cookie
-            if effective is None:
-                # 未配置 cookie：直接用账号密码登录（凭据只补登录一次）
-                if creds and not login_used:
-                    effective = ensure_valid_cookie(None, creds)
-                    login_used = True
-            elif fetch_checkin_state(effective)[0] is None:
-                # cookie 失效：有凭据则登录替换一次，否则保留原值走失效报错
-                if creds and not login_used:
-                    effective = ensure_valid_cookie(effective, creds)
-                    login_used = True
-            success, summary, username = sign_in_account(effective)
-        except Exception as error:  # 网络异常、登录失败等：单账号失败不影响其余账号
+            if cookie:
+                csrf, _checked_in, is_login = fetch_checkin_state(cookie)
+                cookie_valid = csrf is not None and not is_login
+            else:
+                cookie_valid = False
+
+            if cookie_valid:
+                # Cookie 有效：走纯 requests 签到路径
+                success, summary, username = sign_in_account(cookie)
+            elif creds and not login_used:
+                # Cookie 缺失或失效：账号密码兜底，在浏览器会话内登录并就地签到
+                print("[linux.sb] 使用账号密码登录并签到")
+                success, summary, username = browser_sign_in(creds)
+                login_used = True
+            else:
+                # 无有效 cookie 也无可用的兜底凭据：给出明确失效提示
+                success, summary, username = False, (
+                    "Cookie 已失效（未配置 LINUXSB_COOKIE 或凭据已用尽），"
+                    "请更新 cookie 或等待凭据兜底"
+                ), None
+        except Exception as error:  # 网络异常、登录/签到失败等：单账号失败不影响其余账号
             success, summary, username = False, f"签到异常：{error}", None
         # 账号标识优先用页面解析的用户名，取不到才显示「账号 N」；绝不使用 cookie 内容。
         # 用户名只进通知，不出现在日志（日志暴露在公开仓库的 Actions 页面）

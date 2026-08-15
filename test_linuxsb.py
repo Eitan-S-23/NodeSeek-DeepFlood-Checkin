@@ -296,34 +296,9 @@ class AccountLoginTestCase(unittest.TestCase):
         with self.assertRaises(ValueError):
             daily.solve_captcha_question("请输入验证码")
 
-    def test_cookie有效时无需登录(self):
-        """cookie 有效：ensure_valid_cookie 原样返回，不触发浏览器登录"""
-        os.environ["LINUXSB_COOKIE"] = "a=1"
-        with fake_get(PAGE_UNCHECKED),              mock.patch.object(daily, "browser_login") as login_mock:
-            result = daily.ensure_valid_cookie("a=1", {"username": "u", "password": "p"})
-        self.assertEqual(result, "a=1")
-        login_mock.assert_not_called()
-
-    def test_cookie失效时自动登录替换(self):
-        with fake_get("<html>请登录</html>"),              mock.patch.object(daily, "browser_login", return_value="b=2") as login_mock:
-            result = daily.ensure_valid_cookie("a=1", {"username": "u", "password": "p"})
-        self.assertEqual(result, "b=2")
-        login_mock.assert_called_once_with({"username": "u", "password": "p"})
-
-    def test_未配置cookie时用凭据登录(self):
-        with mock.patch.object(daily, "browser_login", return_value="b=2") as login_mock:
-            result = daily.ensure_valid_cookie(None, {"username": "u", "password": "p"})
-        self.assertEqual(result, "b=2")
-        login_mock.assert_called_once()
-
-    def test_cookie失效且无凭据时原样返回(self):
-        with fake_get("<html>请登录</html>"):
-            result = daily.ensure_valid_cookie("a=1", None)
-        self.assertEqual(result, "a=1")
-
 
 class RunLoginFallbackTestCase(unittest.TestCase):
-    """run() 内 cookie 失效降级登录流程测试"""
+    """run() 内 cookie 失效降级登录流程测试（浏览器就地签到）"""
 
     def setUp(self):
         # 屏蔽 run() 签到的 SITE_GAP 随机延迟
@@ -336,37 +311,60 @@ class RunLoginFallbackTestCase(unittest.TestCase):
         for name in ("LINUXSB_COOKIE", "LINUXSB_ACCOUNT"):
             os.environ.pop(name, None)
 
-    def test_cookie失效时登录替代并签到成功(self):
+    def test_cookie失效时浏览器登录签到(self):
         os.environ["LINUXSB_COOKIE"] = "a=1"
         os.environ["LINUXSB_ACCOUNT"] = '{"username": "u", "password": "p"}'
-
-        def get_handler(url, headers=None, cookies=None, timeout=None):
-            # 旧 cookie 访问返回登录页（失效），登录后的新 cookie 返回正常页
-            if cookies and cookies.get("a") == "1":
-                return FakeResponse(text="<html>请登录</html>")
-            return FakeResponse(text=PAGE_UNCHECKED)
-
-        with mock.patch.object(daily.requests, "get", side_effect=get_handler),              fake_post({"ok": 1, "message": "签到成功"}),              mock.patch.object(daily, "browser_login", return_value="b=2") as login_mock,              mock.patch.object(daily.notify, "send") as send_mock:
+        with fake_get("<html>请登录</html>") as get_mock, \
+             mock.patch.object(daily, "browser_sign_in",
+                               return_value=(True, "签到结果: 签到成功（浏览器）", "小明")) as sign_mock, \
+             mock.patch.object(daily.notify, "send") as send_mock:
             code = daily.run()
 
         self.assertEqual(code, 0)
-        login_mock.assert_called_once()
+        # requests 签到路径（sign_in_account）不应被调用
+        get_mock.assert_called()
+        sign_mock.assert_called_once()
+        self.assertIn("浏览器", send_mock.call_args.args[1])
+        self.assertIn("小明", send_mock.call_args.args[1])
+
+    def test_仅配置账号密码时浏览器登录签到(self):
+        os.environ["LINUXSB_ACCOUNT"] = '{"username": "u", "password": "p"}'
+        with mock.patch.object(daily, "browser_sign_in",
+                               return_value=(True, "签到结果: 签到成功", None)) as sign_mock, \
+             mock.patch.object(daily.notify, "send") as send_mock:
+            code = daily.run()
+        self.assertEqual(code, 0)
+        sign_mock.assert_called_once()
         self.assertIn("签到成功", send_mock.call_args.args[1])
 
-    def test_仅配置账号密码时登录签到(self):
+    def test_cookie失效且无凭据时明确报错(self):
+        os.environ["LINUXSB_COOKIE"] = "a=1"
+        with fake_get("<html>请登录</html>"), \
+             mock.patch.object(daily, "browser_sign_in") as sign_mock, \
+             mock.patch.object(daily.notify, "send") as send_mock:
+            code = daily.run()
+        self.assertEqual(code, 1)
+        sign_mock.assert_not_called()
+        self.assertIn("Cookie 已失效", send_mock.call_args.args[1])
+
+    def test_cookie有效时走requests签到不启动浏览器(self):
+        os.environ["LINUXSB_COOKIE"] = "a=1"
         os.environ["LINUXSB_ACCOUNT"] = '{"username": "u", "password": "p"}'
-        with fake_get(PAGE_UNCHECKED), fake_post({"ok": 1, "message": "好"}),              mock.patch.object(daily, "browser_login", return_value="b=2") as login_mock,              mock.patch.object(daily.notify, "send") as send_mock:
+        with fake_get(PAGE_UNCHECKED), fake_post({"ok": 1, "message": "好"}), \
+             mock.patch.object(daily, "browser_sign_in") as sign_mock, \
+             mock.patch.object(daily.notify, "send") as send_mock:
             code = daily.run()
         self.assertEqual(code, 0)
-        login_mock.assert_called_once()
+        sign_mock.assert_not_called()
         self.assertIn("签到成功", send_mock.call_args.args[1])
 
     def test_无cookie无凭据时静默跳过(self):
-        with mock.patch.object(daily.notify, "send") as send_mock,              mock.patch.object(daily, "browser_login") as login_mock:
+        with mock.patch.object(daily.notify, "send") as send_mock, \
+             mock.patch.object(daily, "browser_sign_in") as sign_mock:
             code = daily.run()
         self.assertEqual(code, 0)
         send_mock.assert_not_called()
-        login_mock.assert_not_called()
+        sign_mock.assert_not_called()
 
 
 class RunTestCase(unittest.TestCase):
