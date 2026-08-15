@@ -282,7 +282,11 @@ def ensure_valid_cookie(raw_cookie, creds):
 def fetch_checkin_state(cookie):
     """
     访问签到页，返回 (csrf_token, 是否已签到)。
-    cookie 失效时页面无 CSRF token，csrf 为 None。
+
+    注意区分「签到页」与「登录页」：未登录访问 /daily_checkin 会被 302 到
+    /login，而登录页的登录表单同样带 name="_csrf" 隐藏字段——若把登录页的
+    CSRF 当作有效凭据，会在未登录状态下提交出「假签到成功」。因此 URL 落在
+    /login 或页面含密码输入框时视为 cookie 失效，csrf 返回 None。
     """
     response = requests.get(
         CHECKIN_URL, headers=PAGE_HEADERS, cookies=parse_cookies(cookie), timeout=30
@@ -291,6 +295,11 @@ def fetch_checkin_state(cookie):
         raise RuntimeError(f"获取签到页面失败，HTTP {response.status_code}")
 
     html = response.text
+    final_url = getattr(response, "url", None) or CHECKIN_URL
+    # 登录页特征：最终 URL 是 /login，或 HTML 含登录表单的密码输入框
+    if "/login" in final_url or 'name="password"' in html:
+        return None, CHECKED_IN_TEXT in html
+
     match = CSRF_RE.search(html)
     csrf = match.group(1) if match else None
     checked_in = CHECKED_IN_TEXT in html

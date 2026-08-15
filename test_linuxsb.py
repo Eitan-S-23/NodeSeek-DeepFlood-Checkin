@@ -30,10 +30,11 @@ PAGE_CHECKED = (
 class FakeResponse:
     """模拟 requests.Response"""
 
-    def __init__(self, status_code=200, text="", json_data=None):
+    def __init__(self, status_code=200, text="", json_data=None, url=None):
         self.status_code = status_code
         self.text = text
         self._json_data = json_data
+        self.url = url
 
     def json(self):
         return self._json_data
@@ -82,6 +83,29 @@ class FetchCheckinStateTestCase(unittest.TestCase):
         with fake_get("error", status_code=500):
             with self.assertRaisesRegex(RuntimeError, "HTTP 500"):
                 daily.fetch_checkin_state("a=1")
+
+    def test_登录页含csrf字段仍判定cookie失效(self):
+        """登录页的登录表单同样带 name='_csrf'，不能当作有效签到凭据"""
+        page = ('<form><input type="hidden" name="_csrf" value="logincsrf">'
+                '<input name="username"><input name="password" type="password">'
+                '</form><span>欢迎登录</span>')
+        with fake_get(page):
+            csrf, checked_in = daily.fetch_checkin_state("bad=1")
+        self.assertIsNone(csrf)
+        self.assertFalse(checked_in)
+
+    def test_重定向到登录页url时判定cookie失效(self):
+        """未登录访问 /daily_checkin 会被 302 到 /login（requests 跟随后 url 为 /login）"""
+        page = ('<input type="hidden" name="_csrf" value="logincsrf">'
+                '<input name="password" type="password">')
+        with mock.patch.object(
+            daily.requests, "get",
+            side_effect=lambda *a, **k: FakeResponse(
+                status_code=200, text=page, url="https://linux.sb/login"
+            ),
+        ):
+            csrf, _ = daily.fetch_checkin_state("a=1")
+        self.assertIsNone(csrf)
 
 
 class SignInAccountTestCase(unittest.TestCase):
