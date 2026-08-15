@@ -107,6 +107,25 @@ class SignInAccountTestCase(unittest.TestCase):
         self.assertFalse(success)
         self.assertIn("Cookie 已失效", summary)
 
+    def test_页面无csrf_从cookie的bbs_csrf兜底并成功(self):
+        """页面结构变化不渲染 _csrf 时，用 cookie 中的 bbs_csrf 值完成签到"""
+        with fake_get("<html><body><button>每日签到</button></body></html>"), \
+             fake_post({"ok": 1, "message": "签到成功"}) as post_mock:
+            success, summary = daily.sign_in_account("bbs_auth=abc; bbs_csrf=cookiecsrf123")
+        self.assertTrue(success)
+        self.assertEqual(summary, "签到成功：签到成功")
+        # POST 携带的 _csrf 来自 cookie 中的 bbs_csrf
+        sent_data = post_mock.call_args.kwargs["data"]
+        self.assertEqual(sent_data["_csrf"], "cookiecsrf123")
+
+    def test_重复签到时幂等视为成功(self):
+        """服务端以 ok:0 + 已打卡/重复签到 返回时，视为当日已签到而非失败"""
+        with fake_get(PAGE_UNCHECKED), \
+             fake_post({"ok": 0, "message": "今日已打卡，请明天再来"}):
+            success, summary = daily.sign_in_account("a=1")
+        self.assertTrue(success)
+        self.assertIn("无需重复签到", summary)
+
     def test_服务端拒绝时返回失败不抛异常(self):
         with fake_get(PAGE_UNCHECKED), fake_post({"ok": 0, "message": "请求已过期"}):
             success, summary = daily.sign_in_account("a=1")
@@ -129,12 +148,13 @@ class RunTestCase(unittest.TestCase):
 
         os.environ.pop("LINUXSB_COOKIE", None)
 
-    def test_未配置cookie时退出码为1(self):
-        with mock.patch.object(daily.notify, "send") as send_mock:
+    def test_未配置cookie时静默跳过且不通知(self):
+        with mock.patch.object(daily.notify, "send") as send_mock, \
+             mock.patch.object(daily.time, "sleep") as sleep_mock:
             code = daily.run()
-        self.assertEqual(code, 1)
-        send_mock.assert_called_once()
-        self.assertIn("LINUXSB_COOKIE", send_mock.call_args.args[1])
+        self.assertEqual(code, 0)
+        send_mock.assert_not_called()
+        sleep_mock.assert_not_called()
 
     def test_多账号部分失败时退出码为1且单个失败不中断(self):
         import os

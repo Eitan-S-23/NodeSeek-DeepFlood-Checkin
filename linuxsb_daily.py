@@ -124,12 +124,22 @@ def sign_in_account(cookie):
     """
     单个账号签到，返回 (成功与否, 结果摘要)。
     流程：GET 签到页拿 CSRF 与状态 -> 已签到则跳过 -> POST 签到。
+
+    CSRF token 取用顺序：
+    1. 签到页 HTML 中的 name="_csrf" 隐藏字段（页面保留此写法时）
+    2. cookie 中的 bbs_csrf 值（该论坛程序的 CSRF 凭据即存于此 cookie，
+       部分站点版本页面不再渲染隐藏字段，直接提交 cookie 值即可）
     """
     csrf, checked_in = fetch_checkin_state(cookie)
 
     if csrf is None:
-        # 页面无 CSRF token，通常是因为 Cookie 失效被重定向到了登录页
-        return False, "Cookie 已失效：未找到 CSRF token，请重新登录 linux.sb 并更新 LINUXSB_COOKIE"
+        # 页面未渲染 _csrf 字段时，回退到 cookie 中的 bbs_csrf（程序校验的就是它）
+        csrf = (parse_cookies(cookie) or {}).get("bbs_csrf")
+        if csrf:
+            print("[linux.sb] 页面未发现 _csrf 字段，改用 cookie 中的 bbs_csrf 签到")
+
+    if csrf is None:
+        return False, "Cookie 已失效或页面结构变化：未找到 CSRF token，请重新登录 linux.sb 并更新 LINUXSB_COOKIE"
 
     if checked_in:
         return True, "今日已签到，无需重复签到"
@@ -139,6 +149,10 @@ def sign_in_account(cookie):
         return True, f"签到成功：{result.get('message', '')}"
 
     message = result.get("message", "")
+    # 部分站点版本重复签到时返回 ok:0 +「已签到/已打卡/重复签到」，视为当日已签到（幂等）
+    if any(word in message for word in ("已签到", "已打卡", "重复签到")):
+        return True, f"今日已签到，无需重复签到（服务端：{message}）"
+
     hint = "（Cookie 可能已失效，请重新登录 linux.sb 并更新 LINUXSB_COOKIE）" if "过期" in message else ""
     return False, f"签到失败：{message}{hint}"
 
@@ -150,8 +164,9 @@ def run():
     """
     raw_cookies = os.getenv("LINUXSB_COOKIE", "").strip()
     if not raw_cookies:
-        notify.send("LinuxSB 每日任务失败", "未配置 LINUXSB_COOKIE（浏览器登录 linux.sb 后复制 Cookie）")
-        return 1
+        # 与 DEEPFLOOD_COOKIE 一致：未配置即视为未启用该站，静默跳过、不算失败
+        print("[linux.sb] 未配置 LINUXSB_COOKIE，跳过 linux.sb 签到")
+        return 0
 
     # 签到前随机延迟，拉开与 NodeSeek 等站的执行时间间隔
     gap = random.randint(SITE_GAP_MIN, SITE_GAP_MAX)
