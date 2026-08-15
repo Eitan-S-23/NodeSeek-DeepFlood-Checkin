@@ -15,11 +15,16 @@ qd-today/templates 的 Linux_SB.har 官方模板确认：
    - 响应为 JSON：{"ok":1,"message":"..."} 成功；{"ok":0,"message":"请求已过期"} 失败
 
 环境变量：
-- LINUXSB_COOKIE：登录 Cookie；多账号用 & 分隔，依次签到、单账号失败不中断
+- LINUXSB_COOKIE：登录 Cookie；多账号用 & 分隔，依次签到、单账号失败不中断。
+  优先使用；失效或未配置时，若提供 LINUXSB_ACCOUNT 则自动用账号密码登录
+- LINUXSB_ACCOUNT：账号密码凭据（JSON：{"username":"...","password":"..."}），
+  作为 Cookie 的兜底登录方式。Cookie 有效时不使用；Cookie 失效或缺失时
+  用浏览器自动登录（算术题验证码自动解析，PoW 由页面自身 JS 完成）
 - SITE_GAP_MIN / SITE_GAP_MAX：签到前随机延迟范围（秒，默认 60-180），
   与 nodeseek_daily.py 的站间延迟共用同一对变量，降低被风控判为批量行为的概率
 - 通知渠道配置见 notify.py（TG_BOT_TOKEN、WECOM_WEBHOOK 等，全部可选）
 """
+import json
 import os
 import re
 import random
@@ -73,6 +78,63 @@ def _env_int(name, default):
         return default
 
 
+def env_bool(name, default=False):
+    """解析布尔型环境变量，true/1/yes/on/y（大小写不敏感）为真，其余为假。"""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in ("true", "1", "yes", "on", "y")
+
+
+def load_account_creds():
+    """
+    解析 LINUXSB_ACCOUNT（JSON：{"username": "...", "password": "..."}）。
+    未配置或格式非法时返回 None，不中断签到流程（仅影响兜底登录是否可用）。
+    """
+    raw = os.getenv("LINUXSB_ACCOUNT", "").strip()
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+        username = str(data.get("username", "")).strip()
+        password = str(data.get("password", "")).strip()
+    except (ValueError, AttributeError):
+        print("[linux.sb] LINUXSB_ACCOUNT 不是合法 JSON，请使用 "
+              '格式 {"username": "...", "password": "..."}')
+        return None
+    if not username or not password:
+        print("[linux.sb] LINUXSB_ACCOUNT 缺少 username 或 password 字段")
+        return None
+    return {"username": username, "password": password}
+
+
+# 算术题验证码的运算符映射（无依赖的简单四则运算）
+_CAPTCHA_OPS = {
+    "+": lambda a, b: a + b,
+    "-": lambda a, b: a - b,
+    "×": lambda a, b: a * b,
+    "x": lambda a, b: a * b,
+    "*": lambda a, b: a * b,
+    "÷": lambda a, b: a / b,
+    "/": lambda a, b: a / b,
+}
+
+
+def solve_captcha_question(text):
+    """
+    解析登录页算术题验证码题面（如「9 × 4 = ?」「7 + 3 = ?」）并计算结果。
+    除法结果要求整除（常见题面都是整除），否则该题面无解会抛异常。
+    """
+    match = re.search(r"(\d+)\s*([+\-×x*/÷])\s*(\d+)\s*=\s*\?", text)
+    if not match:
+        raise ValueError(f"无法解析算术题题面：{text!r}")
+    a, op, b = int(match.group(1)), match.group(2), int(match.group(3))
+    result = _CAPTCHA_OPS[op](a, b)
+    if isinstance(result, float) and not result.is_integer():
+        raise ValueError(f"算术题非整除结果：{text}")
+    return str(int(result))
+
+
 # 与 nodeseek_daily.py 共用的站间随机延迟范围（秒）
 SITE_GAP_MIN = _env_int("SITE_GAP_MIN", 60)
 SITE_GAP_MAX = _env_int("SITE_GAP_MAX", 180)
@@ -86,6 +148,94 @@ def parse_cookies(raw_cookie):
             key, value = item.split("=", 1)
             cookies[key.strip()] = value.strip()
     return cookies
+
+
+def browser_login(creds):
+    """
+    用浏览器自动登录 linux.sb，返回登录后的完整 Cookie 字符串。
+
+    登录页的三道验证均由页面自身完成大半：校验码 PoW 由前端 JS 计算，
+    脚本只需填写算术题答案（题面可解析计算）并保持蜜罐字段为空。
+    浏览器库（selenium/undetected_chromedriver 等）函数内局部导入，
+    保证未安装浏览器依赖时纯 requests 签到仍可正常使用。
+    """
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    import undetected_chromedriver as uc
+
+    options = uc.ChromeOptions()
+    # linux.sb 无 Cloudflare 防护，headless 指纹即可通过；Actions 里 Chrome 已预装
+    if not env_bool("HEADLESS", True):
+        options.add_argument("--window-size=1920,1080")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+
+    driver = uc.Chrome(options=options)
+    try:
+        driver.get(f"{BASE_URL}/login")
+        wait = WebDriverWait(driver, 30)
+
+        # 填入用户名与密码
+        username_input = wait.until(EC.presence_of_element_located((By.NAME, "username")))
+        username_input.clear()
+        username_input.send_keys(creds["username"])
+        password_input = driver.find_element(By.NAME, "password")
+        password_input.clear()
+        password_input.send_keys(creds["password"])
+
+        # 读取算术题题面并填入计算结果（例如「9 × 4 = ?」-> 36）
+        question_el = wait.until(
+            EC.visibility_of_element_located((By.CLASS_NAME, "native-captcha-question"))
+        )
+        answer = solve_captcha_question(question_el.text)
+        answer_input = driver.find_element(By.NAME, "native_captcha_answer")
+        answer_input.clear()
+        answer_input.send_keys(answer)
+
+        # 蜜罐字段 native_captcha_company 保持为空（伪装真人必须留空）
+        # 点击登录并等待跳转（登录成功会离开 /login 页面）
+        submit = driver.find_element(By.CSS_SELECTOR, "form button[type=submit], form button")
+        submit.click()
+        wait.until(lambda d: "login" not in d.current_url)
+
+        cookies = driver.get_cookies()
+        if not cookies:
+            raise RuntimeError("登录后未取到任何 Cookie，可能登录被防爬拦截")
+        cookie_str = "; ".join(f"{c['name']}={c['value']}" for c in cookies)
+        return cookie_str
+    except Exception as exc:
+        # 不打印页面源码：公开仓库日志可见，登录后页面可能含个人字段
+        raise RuntimeError(f"浏览器登录失败：{exc}") from exc
+    finally:
+        try:
+            driver.quit()
+        except Exception:
+            pass
+
+
+def ensure_valid_cookie(raw_cookie, creds):
+    """
+    Cookie 优先：现有 Cookie 有效则原样返回。
+    Cookie 无效或未配置、且提供了账号密码时，用浏览器登录替换并返回新 Cookie；
+    无可替代凭据时返回原值（走原签到流程，由后续步骤给出失效提示）。
+    """
+    if raw_cookie:
+        csrf, _checked_in = fetch_checkin_state(raw_cookie)
+        if csrf is not None:
+            return raw_cookie
+        if creds:
+            print("[linux.sb] Cookie 已失效，尝试用账号密码重新登录")
+            new_cookie = browser_login(creds)
+            print("[linux.sb] 账号密码登录成功，已取得新 Cookie")
+            return new_cookie
+        return raw_cookie
+
+    if creds:
+        print("[linux.sb] 未配置 LINUXSB_COOKIE，使用账号密码登录")
+        return browser_login(creds)
+    return None
 
 
 def fetch_checkin_state(cookie):
@@ -274,13 +424,16 @@ def _build_summary(lines, cookie):
 def run():
     """
     执行 linux.sb 每日签到并推送通知，返回进程退出码（全部成功为 0，否则为 1）。
-    多个账号（& 分隔）依次签到：单个账号失败不中断其余账号。
-    通知格式对齐 nodeseek_daily：每个账号一段，段首带「签到时间」与概览行。
+    登录策略：Cookie 优先（多账号用 & 分隔依次签到）；Cookie 缺失或失效时，
+    若配置了 LINUXSB_ACCOUNT 则自动用浏览器登录兜底（最多补一次登录）。
+    单个账号失败不中断其余账号。通知格式对齐 nodeseek_daily：
+    每个账号一段，段首带「签到时间」与概览行。
     """
     raw_cookies = os.getenv("LINUXSB_COOKIE", "").strip()
-    if not raw_cookies:
+    creds = load_account_creds()
+    if not raw_cookies and not creds:
         # 与 DEEPFLOOD_COOKIE 一致：未配置即视为未启用该站，静默跳过、不算失败
-        print("[linux.sb] 未配置 LINUXSB_COOKIE，跳过 linux.sb 签到")
+        print("[linux.sb] 未配置 LINUXSB_COOKIE 且未配置 LINUXSB_ACCOUNT，跳过 linux.sb 签到")
         return 0
 
     # 签到前随机延迟，拉开与 NodeSeek 等站的执行时间间隔
@@ -288,17 +441,29 @@ def run():
     print(f"[linux.sb] 等待 {gap} 秒后再开始，避免连续签到被风控")
     time.sleep(gap)
 
-    cookie_list = raw_cookies.split("&")
-    print(f"[linux.sb] 共 {len(cookie_list)} 个账号开始签到")
+    cookie_list = raw_cookies.split("&") if raw_cookies else [None]
+    print(f"[linux.sb] 共 {len(cookie_list)} 个账号开始签到（Cookie 优先，必要时账号密码兜底）")
 
     results = []
     sections = []
+    login_used = False  # 凭据登录最多补一次，多账号同时失效时只救第一个
     for idx, cookie in enumerate(cookie_list, start=1):
         # 记录本账号开始签到的时间，写入通知，便于核对执行时点
         started_at = time.strftime("%Y-%m-%d %H:%M:%S")
         try:
-            success, summary, username = sign_in_account(cookie)
-        except Exception as error:  # 网络异常等：单个账号失败不影响其余账号
+            effective = cookie
+            if effective is None:
+                # 未配置 cookie：直接用账号密码登录（凭据只补登录一次）
+                if creds and not login_used:
+                    effective = ensure_valid_cookie(None, creds)
+                    login_used = True
+            elif fetch_checkin_state(effective)[0] is None:
+                # cookie 失效：有凭据则登录替换一次，否则保留原值走失效报错
+                if creds and not login_used:
+                    effective = ensure_valid_cookie(effective, creds)
+                    login_used = True
+            success, summary, username = sign_in_account(effective)
+        except Exception as error:  # 网络异常、登录失败等：单账号失败不影响其余账号
             success, summary, username = False, f"签到异常：{error}", None
         # 账号标识优先用页面解析的用户名，取不到才显示「账号 N」；绝不使用 cookie 内容。
         # 用户名只进通知，不出现在日志（日志暴露在公开仓库的 Actions 页面）

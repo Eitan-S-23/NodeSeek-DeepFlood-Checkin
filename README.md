@@ -26,6 +26,7 @@
 - `NS_EXTRA_TASKS`: 除签到外的任务（评论、加鸡腿）总开关，true/false（可选，**默认 false**）
 - `DEEPFLOOD_COOKIE`: DeepFlood 子站的 Cookie（可选）。配置后会自动追加签到第二站；两站用同一套代码、同样页面结构，仅域名与 cookie 不同
 - `LINUXSB_COOKIE`: linux.sb（烧饼社区）的 Cookie（可选）。配置后会在 NodeSeek / DeepFlood 之后追加签到一站；该站无 Cloudflare 防护，用纯 requests 签到（`linuxsb_daily.py`）。多账号用 `&` 分隔（`cookie1&cookie2`），依次签到、单账号失败不中断
+- `LINUXSB_ACCOUNT`: linux.sb 的账号密码兜底登录（可选），格式为 JSON：`{"username":"你的用户名","password":"你的密码"}`。**Cookie 优先**：`LINUXSB_COOKIE` 有效时完全不用凭据；cookie 缺失或失效时自动用浏览器登录（算术题验证码自动填写），登录成功当场继续签到，无需手动换 cookie
 - `SITE_GAP_MIN` / `SITE_GAP_MAX`: 各站签到之间的随机延迟范围（秒，可选，默认 60-180），降低连续签到被风控的概率
 
 布尔类型变量接受 `true`/`1`/`yes`/`on`/`y`（大小写不敏感）为真，其余值一律为假。
@@ -108,7 +109,7 @@ NodeSeek 每日任务
 2. 在仓库的 Settings -> Secrets and variables -> Actions 中添加 Secret `NS_COOKIE`
 3. 可选：添加 `NS_RANDOM` 设置是否随机选择奖励
 4. 可选：需要评论和加鸡腿时，添加 `NS_EXTRA_TASKS=true`（不配置则只签到）
-5. 可选：配置多站签到 `DEEPFLOOD_COOKIE` / `LINUXSB_COOKIE`（不配置则只签 NodeSeek 一站；linux.sb 多账号用 `&` 分隔）
+5. 可选：配置多站签到 `DEEPFLOOD_COOKIE` / `LINUXSB_COOKIE`（不配置则只签 NodeSeek 一站；linux.sb 多账号用 `&` 分隔；linux.sb 可另配 `LINUXSB_ACCOUNT`（JSON 账号密码）作 cookie 失效时的自动登录兜底）
 6. 可选：添加通知渠道的 Secrets（如 `WECOM_WEBHOOK` 或 `TG_BOT_TOKEN` + `TG_USER_ID`），workflow 已预置全部通知变量，未添加的自动跳过
 7. Actions 会在每天 UTC 00:00（北京时间 08:00）自动运行，也可在 Actions 页面手动触发（workflow_dispatch）
 

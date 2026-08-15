@@ -4,6 +4,7 @@
 linuxsb_daily 只依赖 requests 与 notify，这里用 mock 替换网络请求，
 使签到判断与多账号流程可以脱离真实站点独立验证。
 """
+import os
 import unittest
 from unittest import mock
 
@@ -231,6 +232,116 @@ class ExtractUsernameRunTestCase(unittest.TestCase):
         self.assertFalse(success)
         self.assertIn("请求已过期", summary)
         self.assertIn("更新 LINUXSB_COOKIE", summary)
+
+
+class AccountLoginTestCase(unittest.TestCase):
+    """账号密码兜底登录相关测试"""
+
+    def tearDown(self):
+        import os
+
+        for name in ("LINUXSB_ACCOUNT", "LINUXSB_COOKIE"):
+            os.environ.pop(name, None)
+
+    def test_解析合法凭据(self):
+        os.environ["LINUXSB_ACCOUNT"] = '{"username": "xiao ming", "password": "p@ss:word"}'
+        self.assertEqual(daily.load_account_creds(),
+                         {"username": "xiao ming", "password": "p@ss:word"})
+
+    def test_未配置或非法JSON返回None(self):
+        os.environ.pop("LINUXSB_ACCOUNT", None)
+        self.assertIsNone(daily.load_account_creds())
+        os.environ["LINUXSB_ACCOUNT"] = "not-json"
+        self.assertIsNone(daily.load_account_creds())
+        os.environ["LINUXSB_ACCOUNT"] = '{"username": ""}'
+        self.assertIsNone(daily.load_account_creds())
+
+    def test_算术题四则运算(self):
+        cases = {
+            "9 × 4 = ?": "36",
+            "7 + 3 = ?": "10",
+            "12 - 5 = ?": "7",
+            "8 ÷ 2 = ?": "4",
+            "3 * 4 = ?": "12",
+        }
+        for question, expected in cases.items():
+            self.assertEqual(daily.solve_captcha_question(question), expected)
+
+    def test_算术题无法解析抛异常(self):
+        with self.assertRaises(ValueError):
+            daily.solve_captcha_question("请输入验证码")
+
+    def test_cookie有效时无需登录(self):
+        """cookie 有效：ensure_valid_cookie 原样返回，不触发浏览器登录"""
+        os.environ["LINUXSB_COOKIE"] = "a=1"
+        with fake_get(PAGE_UNCHECKED),              mock.patch.object(daily, "browser_login") as login_mock:
+            result = daily.ensure_valid_cookie("a=1", {"username": "u", "password": "p"})
+        self.assertEqual(result, "a=1")
+        login_mock.assert_not_called()
+
+    def test_cookie失效时自动登录替换(self):
+        with fake_get("<html>请登录</html>"),              mock.patch.object(daily, "browser_login", return_value="b=2") as login_mock:
+            result = daily.ensure_valid_cookie("a=1", {"username": "u", "password": "p"})
+        self.assertEqual(result, "b=2")
+        login_mock.assert_called_once_with({"username": "u", "password": "p"})
+
+    def test_未配置cookie时用凭据登录(self):
+        with mock.patch.object(daily, "browser_login", return_value="b=2") as login_mock:
+            result = daily.ensure_valid_cookie(None, {"username": "u", "password": "p"})
+        self.assertEqual(result, "b=2")
+        login_mock.assert_called_once()
+
+    def test_cookie失效且无凭据时原样返回(self):
+        with fake_get("<html>请登录</html>"):
+            result = daily.ensure_valid_cookie("a=1", None)
+        self.assertEqual(result, "a=1")
+
+
+class RunLoginFallbackTestCase(unittest.TestCase):
+    """run() 内 cookie 失效降级登录流程测试"""
+
+    def setUp(self):
+        # 屏蔽 run() 签到的 SITE_GAP 随机延迟
+        self.sleep_mock = mock.patch.object(daily.time, "sleep").start()
+        self.addCleanup(mock.patch.stopall)
+
+    def tearDown(self):
+        import os
+
+        for name in ("LINUXSB_COOKIE", "LINUXSB_ACCOUNT"):
+            os.environ.pop(name, None)
+
+    def test_cookie失效时登录替代并签到成功(self):
+        os.environ["LINUXSB_COOKIE"] = "a=1"
+        os.environ["LINUXSB_ACCOUNT"] = '{"username": "u", "password": "p"}'
+
+        def get_handler(url, headers=None, cookies=None, timeout=None):
+            # 旧 cookie 访问返回登录页（失效），登录后的新 cookie 返回正常页
+            if cookies and cookies.get("a") == "1":
+                return FakeResponse(text="<html>请登录</html>")
+            return FakeResponse(text=PAGE_UNCHECKED)
+
+        with mock.patch.object(daily.requests, "get", side_effect=get_handler),              fake_post({"ok": 1, "message": "签到成功"}),              mock.patch.object(daily, "browser_login", return_value="b=2") as login_mock,              mock.patch.object(daily.notify, "send") as send_mock:
+            code = daily.run()
+
+        self.assertEqual(code, 0)
+        login_mock.assert_called_once()
+        self.assertIn("签到成功", send_mock.call_args.args[1])
+
+    def test_仅配置账号密码时登录签到(self):
+        os.environ["LINUXSB_ACCOUNT"] = '{"username": "u", "password": "p"}'
+        with fake_get(PAGE_UNCHECKED), fake_post({"ok": 1, "message": "好"}),              mock.patch.object(daily, "browser_login", return_value="b=2") as login_mock,              mock.patch.object(daily.notify, "send") as send_mock:
+            code = daily.run()
+        self.assertEqual(code, 0)
+        login_mock.assert_called_once()
+        self.assertIn("签到成功", send_mock.call_args.args[1])
+
+    def test_无cookie无凭据时静默跳过(self):
+        with mock.patch.object(daily.notify, "send") as send_mock,              mock.patch.object(daily, "browser_login") as login_mock:
+            code = daily.run()
+        self.assertEqual(code, 0)
+        send_mock.assert_not_called()
+        login_mock.assert_not_called()
 
 
 class RunTestCase(unittest.TestCase):
