@@ -141,12 +141,30 @@ SITE_GAP_MAX = _env_int("SITE_GAP_MAX", 180)
 
 
 def parse_cookies(raw_cookie):
-    """把形如 'a=1; b=2' 的 Cookie 字符串解析为字典。"""
+    """
+    把 Cookie 字符串解析为字典（与 nodeseek_daily.py 同策略）。
+
+    cookie 值本身可能含分号（例如被截断的 JSON），无脑按分号切分会把一个
+    cookie 拆成两半。因此逐段判断：某段等号左侧不是合法 cookie 名时，
+    视为上一个 cookie 值的延续并拼回去。
+    """
+    name_pattern = re.compile(r"^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$")
     cookies = {}
-    for item in raw_cookie.strip().split(";"):
-        if "=" in item:
-            key, value = item.split("=", 1)
-            cookies[key.strip()] = value.strip()
+    current = None
+    for chunk in re.split(r"[;\r\n]+", raw_cookie or ""):
+        segment = chunk.strip()
+        if not segment:
+            continue
+        if "=" in segment:
+            key, value = segment.split("=", 1)
+            key = key.strip()
+            if key and name_pattern.match(key):
+                cookies[key] = value.strip()
+                current = key
+                continue
+        # 残段：不是新 cookie（如值内含分号），拼回上一个 cookie 的值
+        if current is not None:
+            cookies[current] += ";" + segment
     return cookies
 
 
@@ -263,7 +281,7 @@ def ensure_valid_cookie(raw_cookie, creds):
     无可替代凭据时返回原值（走原签到流程，由后续步骤给出失效提示）。
     """
     if raw_cookie:
-        csrf, _checked_in = fetch_checkin_state(raw_cookie)
+        csrf, _checked_in, _is_login = fetch_checkin_state(raw_cookie)
         if csrf is not None:
             return raw_cookie
         if creds:
@@ -281,7 +299,7 @@ def ensure_valid_cookie(raw_cookie, creds):
 
 def fetch_checkin_state(cookie):
     """
-    访问签到页，返回 (csrf_token, 是否已签到)。
+    访问签到页，返回 (csrf_token, 是否已签到, 是否为登录页)。
 
     注意区分「签到页」与「登录页」：未登录访问 /daily_checkin 会被 302 到
     /login，而登录页的登录表单同样带 name="_csrf" 隐藏字段——若把登录页的
@@ -298,12 +316,12 @@ def fetch_checkin_state(cookie):
     final_url = getattr(response, "url", None) or CHECKIN_URL
     # 登录页特征：最终 URL 是 /login，或 HTML 含登录表单的密码输入框
     if "/login" in final_url or 'name="password"' in html:
-        return None, CHECKED_IN_TEXT in html
+        return None, CHECKED_IN_TEXT in html, True
 
     match = CSRF_RE.search(html)
     csrf = match.group(1) if match else None
     checked_in = CHECKED_IN_TEXT in html
-    return csrf, checked_in
+    return csrf, checked_in, False
 
 
 def send_checkin_request(cookie, csrf):
@@ -429,16 +447,18 @@ def sign_in_account(cookie):
     2. cookie 中的 bbs_csrf 值（该论坛程序的 CSRF 凭据即存于此 cookie，
        部分站点版本页面不再渲染隐藏字段，直接提交 cookie 值即可）
     """
-    csrf, checked_in = fetch_checkin_state(cookie)
+    csrf, checked_in, is_login_page = fetch_checkin_state(cookie)
 
     if csrf is None:
-        # 页面未渲染 _csrf 字段时，回退到 cookie 中的 bbs_csrf（程序校验的就是它）
-        csrf = (parse_cookies(cookie) or {}).get("bbs_csrf")
-        if csrf:
-            print("[linux.sb] 页面未发现 _csrf 字段，改用 cookie 中的 bbs_csrf 签到")
-
-    if csrf is None:
-        return False, "Cookie 已失效或页面结构变化：未找到 CSRF token，请重新登录 linux.sb 并更新 LINUXSB_COOKIE", None
+        # 仅当页面是真正的签到页（模板不再渲染 _csrf 字段）时才回退到
+        # cookie 中的 bbs_csrf；登录页说明 cookie 已失效，绝不兜底（否则假签到）
+        if not is_login_page:
+            page_csrf = (parse_cookies(cookie) or {}).get("bbs_csrf")
+            if page_csrf:
+                print("[linux.sb] 签到页未渲染 _csrf 字段，改用 cookie 中的 bbs_csrf 签到")
+                csrf = page_csrf
+        if csrf is None:
+            return False, "Cookie 已失效或页面结构变化：未找到 CSRF token，请重新登录 linux.sb 并更新 LINUXSB_COOKIE", None
 
     if checked_in:
         summary, username = _build_summary(["签到结果: 今日已签到，无需重复签到"], cookie)

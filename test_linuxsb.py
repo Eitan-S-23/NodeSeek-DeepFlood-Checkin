@@ -63,19 +63,19 @@ class FetchCheckinStateTestCase(unittest.TestCase):
 
     def test_提取csrf且未签到(self):
         with fake_get(PAGE_UNCHECKED):
-            csrf, checked_in = daily.fetch_checkin_state("a=1; b=2")
+            csrf, checked_in, _ = daily.fetch_checkin_state("a=1; b=2")
         self.assertEqual(csrf, "abc123csrf")
         self.assertFalse(checked_in)
 
     def test_识别已签到状态(self):
         with fake_get(PAGE_CHECKED):
-            csrf, checked_in = daily.fetch_checkin_state("a=1")
+            csrf, checked_in, _ = daily.fetch_checkin_state("a=1")
         self.assertEqual(csrf, "abc123csrf")
         self.assertTrue(checked_in)
 
     def test_cookie失效时无csrf(self):
         with fake_get("<html>请登录</html>"):
-            csrf, checked_in = daily.fetch_checkin_state("invalid=1")
+            csrf, checked_in, _ = daily.fetch_checkin_state("invalid=1")
         self.assertIsNone(csrf)
         self.assertFalse(checked_in)
 
@@ -90,7 +90,7 @@ class FetchCheckinStateTestCase(unittest.TestCase):
                 '<input name="username"><input name="password" type="password">'
                 '</form><span>欢迎登录</span>')
         with fake_get(page):
-            csrf, checked_in = daily.fetch_checkin_state("bad=1")
+            csrf, checked_in, _ = daily.fetch_checkin_state("bad=1")
         self.assertIsNone(csrf)
         self.assertFalse(checked_in)
 
@@ -104,8 +104,9 @@ class FetchCheckinStateTestCase(unittest.TestCase):
                 status_code=200, text=page, url="https://linux.sb/login"
             ),
         ):
-            csrf, _ = daily.fetch_checkin_state("a=1")
+            csrf, _, is_login = daily.fetch_checkin_state("a=1")
         self.assertIsNone(csrf)
+        self.assertTrue(is_login)
 
 
 class SignInAccountTestCase(unittest.TestCase):
