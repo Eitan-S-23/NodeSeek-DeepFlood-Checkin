@@ -290,7 +290,7 @@ class RunTestCase(unittest.TestCase):
         self.assertEqual(send_mock.call_args.args[0], "LinuxSB 每日任务")
 
     def test_通知内容对齐nodeseek分段格式(self):
-        """通知含顶部执行时间、【linux.sb】分段与各账号概览"""
+        """通知含各账号执行时间与概览；【linux.sb】域名与任务级时间不进通知"""
         import os
 
         os.environ["LINUXSB_COOKIE"] = "a=1"
@@ -302,11 +302,48 @@ class RunTestCase(unittest.TestCase):
         self.assertEqual(code, 0)
         content = send_mock.call_args.args[1]
         self.assertIn("执行时间: ", content)
-        self.assertIn("【linux.sb】", content)
+        self.assertNotIn("【linux.sb】", content)
+        self.assertNotIn("linux.sb", content)  # 站点域名不进入通知
         self.assertIn("账号 1", content)
         self.assertIn("签到结果: 签到成功", content)
         self.assertIn("当前积分: 888", content)
         self.assertIn("连续签到: 3 天", content)
+
+    def test_日志不输出用户名只输出账号号(self):
+        """用户名只进通知；日志（公开仓库 Actions 页面可见）只显示「账号 N」"""
+        import os
+        from unittest.mock import patch
+
+        os.environ["LINUXSB_COOKIE"] = "bbs_auth=abc; bbs_csrf=csrf123"
+        page = ('<a class="user-name" href="/user/42">秦昭襄王</a>'
+                '<div>当前积分：888</div>'
+                '<input type="hidden" name="_csrf" value="abc">')
+        out = __import__("io").StringIO()
+        with fake_get(page), fake_post({"ok": 1, "message": "好"}), \
+             patch("sys.stdout", new=out), \
+             mock.patch.object(daily.notify, "send") as send_mock:
+            code = daily.run()
+        self.assertEqual(code, 0)
+        # 日志：有账号 1，无用户名、无 cookie 键名/值
+        self.assertIn("账号 1", out.getvalue())
+        self.assertNotIn("秦昭襄王", out.getvalue())
+        self.assertNotIn("bbs_auth", out.getvalue())
+        self.assertNotIn("bbs_csrf", out.getvalue())
+        # 通知：用户名在，cookie 不在
+        self.assertIn("秦昭襄王", send_mock.call_args.args[1])
+        self.assertNotIn("bbs_auth", send_mock.call_args.args[1])
+
+    def test_post响应redirect字段不展示(self):
+        import os
+
+        os.environ["LINUXSB_COOKIE"] = "a=1"
+        with fake_get(PAGE_UNCHECKED), \
+             fake_post({"ok": 1, "message": "", "redirect": "/daily_checkin", "bonus": 10}), \
+             mock.patch.object(daily.notify, "send") as send_mock:
+            daily.run()
+        content = send_mock.call_args.args[1]
+        self.assertNotIn("redirect", content)
+        self.assertIn("bonus: 10", content)
 
     def test_签到前有随机延迟(self):
         import os

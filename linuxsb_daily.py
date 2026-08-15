@@ -224,9 +224,10 @@ def sign_in_account(cookie):
     result = send_checkin_request(cookie, csrf)
     if result.get("ok") in (1, True, "1", "true"):
         message = result.get("message", "")
-        # POST 响应中 ok/message 之外的字段一并展示（不同站点版本字段名不同）
+        # POST 响应中 ok/message 之外的字段一并展示（不同站点版本字段名不同）；
+        # redirect 是服务端「签到后跳回签到页」的固定路径，无信息量，不展示
         extras = [f"{key}: {value}" for key, value in result.items()
-                  if key not in ("ok", "message")]
+                  if key not in ("ok", "message", "redirect")]
         summary = "\n".join(extras)
         lines = [f"签到结果: 签到成功{f'（{message}）' if message else ''}"]
         if summary:
@@ -282,9 +283,6 @@ def run():
         print("[linux.sb] 未配置 LINUXSB_COOKIE，跳过 linux.sb 签到")
         return 0
 
-    # 记录任务启动时刻，作为通知顶部时间，早于各账号签到时间，符合直觉的时间轴顺序
-    task_started_at = time.strftime("%Y-%m-%d %H:%M:%S")
-
     # 签到前随机延迟，拉开与 NodeSeek 等站的执行时间间隔
     gap = random.randint(SITE_GAP_MIN, SITE_GAP_MAX)
     print(f"[linux.sb] 等待 {gap} 秒后再开始，避免连续签到被风控")
@@ -302,9 +300,10 @@ def run():
             success, summary, username = sign_in_account(cookie)
         except Exception as error:  # 网络异常等：单个账号失败不影响其余账号
             success, summary, username = False, f"签到异常：{error}", None
-        # 账号标识优先用页面解析的用户名，取不到才显示「账号 N」；绝不使用 cookie 内容
+        # 账号标识优先用页面解析的用户名，取不到才显示「账号 N」；绝不使用 cookie 内容。
+        # 用户名只进通知，不出现在日志（日志暴露在公开仓库的 Actions 页面）
         display = username or f"账号 {idx}"
-        print(f"[linux.sb] {display}：{summary}")
+        print(f"[linux.sb] 账号 {idx}：{summary}")
         results.append((success, summary))
         sections.append(
             f"{display}\n"
@@ -314,11 +313,9 @@ def run():
 
     all_success = all(success for success, _ in results)
     title = "LinuxSB 每日任务" + ("" if all_success else "（签到异常）")
-    content = (
-        f"执行时间: {task_started_at}\n"
-        "【linux.sb】\n"
-        + "\n\n".join(sections)
-    )
+    # 通知不输出站点域名与任务级执行时间：单站通知里任务级时间与本账号
+    # 执行时间语义重叠且相差随机延迟，反而容易误读成两个不同时刻
+    content = "\n\n".join(sections)
     notify.send(title, content)
     return 0 if all_success else 1
 
