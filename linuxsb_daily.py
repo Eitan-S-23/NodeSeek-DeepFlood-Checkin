@@ -435,14 +435,18 @@ def sign_in_account(cookie):
 def _build_summary(lines, cookie):
     """追加登录态页面中的用户名/积分/连续签到概览，返回 (摘要, 用户名或 None)。"""
     html = ""
+    status = None
+    final_url = None
     try:
         response = requests.get(
             CHECKIN_URL, headers=PAGE_HEADERS, cookies=parse_cookies(cookie), timeout=30
         )
-        if response.status_code == 200:
+        status = response.status_code
+        final_url = response.url
+        if status == 200:
             html = response.text
-    except requests.RequestException:
-        pass
+    except requests.RequestException as exc:
+        print(f"[linux.sb] 概览页 GET 异常：{exc}")
 
     username = None
     if html:
@@ -450,6 +454,10 @@ def _build_summary(lines, cookie):
         for label, value in extract_checkin_meta(html):
             lines.append(f"{label}: {value}")
         _debug_dump_checkin_area(html)
+    else:
+        # 拿不到概览时把真实原因写进日志，方便定位（公开日志不含敏感信息）
+        location = f"，最终 URL {final_url}" if final_url else ""
+        print(f"[linux.sb] 概览页未取到：HTTP {status}{location}")
     # 抓不到概览信息时至少注明原因，避免通知里只有孤零零一行结果
     if len(lines) == 1:
         lines.append("概览信息: 未从页面取到（模板差异或 Cookie 权限不足）")
