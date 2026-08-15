@@ -442,7 +442,8 @@ def _build_summary(lines, cookie):
             CHECKIN_URL, headers=PAGE_HEADERS, cookies=parse_cookies(cookie), timeout=30
         )
         status = response.status_code
-        final_url = response.url
+        # 跟随重定向后的最终 URL（requests.Response 自带，mock 场景可能缺失）
+        final_url = getattr(response, "url", None)
         if status == 200:
             html = response.text
     except requests.RequestException as exc:
