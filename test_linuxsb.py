@@ -90,15 +90,15 @@ class SignInAccountTestCase(unittest.TestCase):
         with fake_get(PAGE_UNCHECKED), fake_post({"ok": 1, "message": "签到成功"}):
             success, summary = daily.sign_in_account("a=1")
         self.assertTrue(success)
-        self.assertEqual(summary, "签到成功：签到成功")
+        self.assertIn("签到结果: 签到成功（签到成功）", summary)
 
     def test_已签到跳过post(self):
         with fake_get(PAGE_CHECKED) as get_mock, \
              mock.patch.object(daily.requests, "post") as post_mock:
             success, summary = daily.sign_in_account("a=1")
         self.assertTrue(success)
-        self.assertEqual(summary, "今日已签到，无需重复签到")
-        get_mock.assert_called_once()
+        self.assertIn("今日已签到", summary)
+        get_mock.assert_called()
         post_mock.assert_not_called()
 
     def test_cookie失效给出明确提示(self):
@@ -109,11 +109,12 @@ class SignInAccountTestCase(unittest.TestCase):
 
     def test_页面无csrf_从cookie的bbs_csrf兜底并成功(self):
         """页面结构变化不渲染 _csrf 时，用 cookie 中的 bbs_csrf 值完成签到"""
-        with fake_get("<html><body><button>每日签到</button></body></html>"), \
+        page = '<html><body><button>每日签到</button></body></html>'
+        with fake_get(page), \
              fake_post({"ok": 1, "message": "签到成功"}) as post_mock:
             success, summary = daily.sign_in_account("bbs_auth=abc; bbs_csrf=cookiecsrf123")
         self.assertTrue(success)
-        self.assertEqual(summary, "签到成功：签到成功")
+        self.assertIn("签到成功", summary)
         # POST 携带的 _csrf 来自 cookie 中的 bbs_csrf
         sent_data = post_mock.call_args.kwargs["data"]
         self.assertEqual(sent_data["_csrf"], "cookiecsrf123")
@@ -125,6 +126,35 @@ class SignInAccountTestCase(unittest.TestCase):
             success, summary = daily.sign_in_account("a=1")
         self.assertTrue(success)
         self.assertIn("无需重复签到", summary)
+
+    def test_post响应额外字段进入摘要(self):
+        """ok:1 响应中的积分等字段一并展示（不同站点版本字段名不同）"""
+        with fake_get(PAGE_UNCHECKED), \
+             fake_post({"ok": 1, "message": "", "bonus": 10, "balance": 888}):
+            success, summary = daily.sign_in_account("a=1")
+        self.assertTrue(success)
+        self.assertIn("bonus: 10", summary)
+        self.assertIn("balance: 888", summary)
+
+
+class ExtractCheckinMetaTestCase(unittest.TestCase):
+    """签到页概览信息提取测试"""
+
+    def test_提取积分与连续签到(self):
+        html = ('<div>当前积分：1,234</div><div>连续签到 5 天</div>'
+                '<span>今日已签到</span>')
+        found = dict(daily.extract_checkin_meta(html))
+        self.assertEqual(found.get("当前积分"), "1,234")
+        self.assertEqual(found.get("连续签到"), "5 天")
+
+    def test_标签与注释不影响提取(self):
+        html = ('<!-- 积分:9999 --><p><b>积分</b> ： 88</p>')
+        found = dict(daily.extract_checkin_meta(html))
+        # 注释里的数字应被忽略，取可见文本中的 88
+        self.assertEqual(found.get("积分"), "88")
+
+    def test_无积分信息时返回空(self):
+        self.assertEqual(daily.extract_checkin_meta("<html>请先登录</html>"), [])
 
     def test_服务端拒绝时返回失败不抛异常(self):
         with fake_get(PAGE_UNCHECKED), fake_post({"ok": 0, "message": "请求已过期"}):
@@ -189,6 +219,25 @@ class RunTestCase(unittest.TestCase):
             code = daily.run()
         self.assertEqual(code, 0)
         self.assertEqual(send_mock.call_args.args[0], "LinuxSB 每日任务")
+
+    def test_通知内容对齐nodeseek分段格式(self):
+        """通知含顶部执行时间、【linux.sb】分段与各账号概览"""
+        import os
+
+        os.environ["LINUXSB_COOKIE"] = "a=1"
+        page = ('<div>当前积分：888</div><div>连续签到 3 天</div>'
+                '<input type="hidden" name="_csrf" value="abc">')
+        with fake_get(page), fake_post({"ok": 1, "message": ""}), \
+             mock.patch.object(daily.notify, "send") as send_mock:
+            code = daily.run()
+        self.assertEqual(code, 0)
+        content = send_mock.call_args.args[1]
+        self.assertIn("执行时间: ", content)
+        self.assertIn("【linux.sb】", content)
+        self.assertIn("账号 1", content)
+        self.assertIn("签到结果: 签到成功", content)
+        self.assertIn("积分: 888", content)
+        self.assertIn("连续签到: 3 天", content)
 
     def test_签到前有随机延迟(self):
         import os

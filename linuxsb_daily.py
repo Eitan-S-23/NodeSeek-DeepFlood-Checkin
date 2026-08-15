@@ -120,10 +120,39 @@ def send_checkin_request(cookie, csrf):
     return response.json()
 
 
+def extract_checkin_meta(html):
+    """
+    从【登录后】的签到页 HTML 提取展示信息（当前积分、连续签到等）。
+    站点模板不同则抓不到，抓不到时返回空列表，不影响签到结果。
+    返回格式：[("当前积分", "1,234"), ("连续签到", "5 天")]
+    """
+    text = re.sub(r"<[^>]+>", " ", html)
+    # 压缩空白：<!-- 注释 --> 内容也可能残留数字，先去除注释
+    text = re.sub(r"<!--[\s\S]*?-->", " ", text)
+    text = re.sub(r"\s+", " ", text)
+
+    found = []
+    # 每种展示信息：关键词后 20 个字符内找第一个数字
+    for label, suffix in (("当前积分", ""), ("积分", ""), ("连续签到", " 天")):
+        index = 0
+        while True:
+            pos = text.find(label, index)
+            if pos == -1:
+                break
+            segment = text[pos + len(label): pos + len(label) + 20]
+            match = re.search(r"\d[\d,]*", segment)
+            if match:
+                found.append((label, match.group(0) + suffix))
+                break
+            index = pos + len(label)
+    return found
+
+
 def sign_in_account(cookie):
     """
-    单个账号签到，返回 (成功与否, 结果摘要)。
-    流程：GET 签到页拿 CSRF 与状态 -> 已签到则跳过 -> POST 签到。
+    单个账号签到，返回 (成功与否, 多行结果摘要)。
+    流程：GET 签到页拿 CSRF 与状态 -> 已签到则跳过 -> POST 签到 ->
+    签到后再取一次签到页，提取「当前积分」「连续签到」等展示信息（拿不到则省略）。
 
     CSRF token 取用顺序：
     1. 签到页 HTML 中的 name="_csrf" 隐藏字段（页面保留此写法时）
@@ -142,31 +171,65 @@ def sign_in_account(cookie):
         return False, "Cookie 已失效或页面结构变化：未找到 CSRF token，请重新登录 linux.sb 并更新 LINUXSB_COOKIE"
 
     if checked_in:
-        return True, "今日已签到，无需重复签到"
+        lines = ["签到结果: 今日已签到，无需重复签到"]
+        return True, _build_summary(lines, cookie)
 
     result = send_checkin_request(cookie, csrf)
     if result.get("ok") in (1, True, "1", "true"):
-        return True, f"签到成功：{result.get('message', '')}"
+        message = result.get("message", "")
+        # POST 响应中 ok/message 之外的字段一并展示（不同站点版本字段名不同）
+        extras = [f"{key}: {value}" for key, value in result.items()
+                  if key not in ("ok", "message")]
+        summary = "\n".join(extras)
+        lines = [f"签到结果: 签到成功{f'（{message}）' if message else ''}"]
+        if summary:
+            lines.append(summary)
+        return True, _build_summary(lines, cookie)
 
     message = result.get("message", "")
     # 部分站点版本重复签到时返回 ok:0 +「已签到/已打卡/重复签到」，视为当日已签到（幂等）
     if any(word in message for word in ("已签到", "已打卡", "重复签到")):
-        return True, f"今日已签到，无需重复签到（服务端：{message}）"
+        return True, _build_summary([f"签到结果: 今日已签到，无需重复签到（服务端：{message}）"], cookie)
 
     hint = "（Cookie 可能已失效，请重新登录 linux.sb 并更新 LINUXSB_COOKIE）" if "过期" in message else ""
     return False, f"签到失败：{message}{hint}"
+
+
+def _build_summary(lines, cookie):
+    """在结果行后追加登录态页面中的积分/连续签到展示信息，对齐 nodeseek 通知的概览格式。"""
+    html = ""
+    try:
+        response = requests.get(
+            CHECKIN_URL, headers=PAGE_HEADERS, cookies=parse_cookies(cookie), timeout=30
+        )
+        if response.status_code == 200:
+            html = response.text
+    except requests.RequestException:
+        pass
+
+    if html:
+        for label, value in extract_checkin_meta(html):
+            lines.append(f"{label}: {value}")
+    # 抓不到概览信息时至少注明原因，避免通知里只有孤零零一行结果
+    if len(lines) == 1:
+        lines.append("概览信息: 未从页面取到（模板差异或 Cookie 权限不足）")
+    return "\n".join(lines)
 
 
 def run():
     """
     执行 linux.sb 每日签到并推送通知，返回进程退出码（全部成功为 0，否则为 1）。
     多个账号（& 分隔）依次签到：单个账号失败不中断其余账号。
+    通知格式对齐 nodeseek_daily：顶部任务执行时间 + 站点分段 + 各账号概览行。
     """
     raw_cookies = os.getenv("LINUXSB_COOKIE", "").strip()
     if not raw_cookies:
         # 与 DEEPFLOOD_COOKIE 一致：未配置即视为未启用该站，静默跳过、不算失败
         print("[linux.sb] 未配置 LINUXSB_COOKIE，跳过 linux.sb 签到")
         return 0
+
+    # 记录任务启动时刻，作为通知顶部时间，早于各账号签到时间，符合直觉的时间轴顺序
+    task_started_at = time.strftime("%Y-%m-%d %H:%M:%S")
 
     # 签到前随机延迟，拉开与 NodeSeek 等站的执行时间间隔
     gap = random.randint(SITE_GAP_MIN, SITE_GAP_MAX)
@@ -177,18 +240,30 @@ def run():
     print(f"[linux.sb] 共 {len(cookie_list)} 个账号开始签到")
 
     results = []
+    sections = []
     for idx, cookie in enumerate(cookie_list, start=1):
         name = cookie.split(";", 1)[0].split("=", 1)[0] or f"账号{idx}"
+        # 记录本账号开始签到的时间，写入通知，便于核对执行时点
+        started_at = time.strftime("%Y-%m-%d %H:%M:%S")
         try:
             success, summary = sign_in_account(cookie)
         except Exception as error:  # 网络异常等：单个账号失败不影响其余账号
             success, summary = False, f"签到异常：{error}"
         print(f"[linux.sb] 账号 {idx}（{name}）：{summary}")
-        results.append((success, f"账号 {idx}（{name}）：{summary}"))
+        results.append((success, summary))
+        sections.append(
+            f"账号 {idx}（{name}）\n"
+            f"执行时间: {started_at}\n"
+            f"{summary}"
+        )
 
     all_success = all(success for success, _ in results)
     title = "LinuxSB 每日任务" + ("" if all_success else "（签到异常）")
-    content = "\n".join(f"- {summary}" for _, summary in results)
+    content = (
+        f"执行时间: {task_started_at}\n"
+        "【linux.sb】\n"
+        + "\n\n".join(sections)
+    )
     notify.send(title, content)
     return 0 if all_success else 1
 
