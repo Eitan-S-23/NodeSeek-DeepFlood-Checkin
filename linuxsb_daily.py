@@ -459,7 +459,7 @@ def _debug_dump_checkin_area(html):
         return segment
 
     body = re.search(r"<body[\s\S]*", html)
-    segment = (body.group(0) if body else html)[:2000]
+    segment = (body.group(0) if body else html)[:6000]
     print(f"[linux.sb][debug] 页面片段：\n{redact(segment)}")
 
 
