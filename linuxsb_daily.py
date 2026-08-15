@@ -287,6 +287,7 @@ def browser_sign_in(creds):
         # 刷新签到页提取用户名/积分/连续签到概览
         driver.refresh()
         wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'input[name="_csrf"]')))
+        print(f"[linux.sb] 签到页：URL {driver.current_url}，标题「{driver.title}」")
         html = driver.page_source
         meta = extract_checkin_meta(html)
         for label, value in meta:
@@ -422,8 +423,8 @@ def extract_username(html):
 
 def _debug_dump_checkin_area(html):
     """
-    调试辅助：打印「当前积分」附近的页面片段（已脱敏），便于按实际页面结构
-    调整用户名/积分解析正则。LINUXSB_DEBUG=1 时输出；概览提取全部落空时自动输出。
+    调试辅助：打印签到页 body 开头片段（已脱敏），便于按实际页面结构
+    调整用户名/积分解析正则。LINUXSB_DEBUG=1 时输出；概览提取落空时自动输出。
     """
     def redact(segment):
         segment = re.sub(r'name="_csrf"\s+value="[^"]*"', 'name="_csrf" value="***"', segment)
@@ -432,15 +433,8 @@ def _debug_dump_checkin_area(html):
         segment = re.sub(r'(href="/user/\d+"[^>]*>)[^<]+', r'\1***', segment)
         return segment
 
-    segment = None
-    for keyword in ("当前积分", "积分", "签到"):
-        pos = html.find(keyword)
-        if pos != -1:
-            start = max(0, pos - 250)
-            segment = html[start:pos + 120]
-            break
-    if segment is None:
-        segment = html[:700]
+    body = re.search(r"<body[\s\S]*", html)
+    segment = (body.group(0) if body else html)[:2000]
     print(f"[linux.sb][debug] 页面片段：\n{redact(segment)}")
 
 
