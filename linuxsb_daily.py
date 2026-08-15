@@ -150,6 +150,30 @@ def parse_cookies(raw_cookie):
     return cookies
 
 
+def detect_chrome_major_version():
+    """
+    探测 Chrome 大版本号：优先读环境变量 CHROME_MAJOR_VERSION，
+    否则解析 google-chrome --version（与 nodeseek_daily.py 策略一致）。
+    未探测到时返回 None，由 undetected-chromedriver 自动匹配。
+    """
+    import subprocess
+
+    raw = os.getenv("CHROME_MAJOR_VERSION", "").strip()
+    if raw.isdigit():
+        return int(raw)
+    try:
+        result = subprocess.run(
+            ["google-chrome", "--version"],
+            capture_output=True, text=True, timeout=10,
+        )
+        match = re.search(r"(\d+)\.", result.stdout)
+        if match:
+            return int(match.group(1))
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return None
+
+
 def browser_login(creds):
     """
     用浏览器自动登录 linux.sb，返回登录后的完整 Cookie 字符串。
@@ -165,14 +189,25 @@ def browser_login(creds):
     import undetected_chromedriver as uc
 
     options = uc.ChromeOptions()
-    # linux.sb 无 Cloudflare 防护，headless 指纹即可通过；Actions 里 Chrome 已预装
-    if not env_bool("HEADLESS", True):
+    # linux.sb 无 Cloudflare 防护，无头模式即可通过（Actions 无显示环境必须无头）；
+    # 需要调试时设 HEADLESS=false 配合 xvfb 使用
+    if env_bool("HEADLESS", True):
+        options.add_argument("--headless=new")
+    else:
         options.add_argument("--window-size=1920,1080")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
 
-    driver = uc.Chrome(options=options)
+    # runner 预装的 Chrome 往往落后于最新 chromedriver，版本不匹配会直接抛
+    # SessionNotCreatedException；显式传入实际大版本号强制取匹配的驱动
+    driver_kwargs = {}
+    version_main = detect_chrome_major_version()
+    if version_main:
+        print(f"[linux.sb] 检测到 Chrome 大版本 {version_main}，使用匹配的驱动")
+        driver_kwargs["version_main"] = version_main
+
+    driver = uc.Chrome(options=options, **driver_kwargs)
     try:
         driver.get(f"{BASE_URL}/login")
         wait = WebDriverWait(driver, 30)
