@@ -1,12 +1,12 @@
 # NodeSeek 自动签到评论加鸡腿脚本
 
-这是一个用于 NodeSeek 论坛的自动化脚本，包含签到、评论和加鸡腿功能。使用 Selenium 和 undetected-chromedriver 实现自动化操作。
+这是一个用于 NodeSeek 及同站体系（DeepFlood）、并附带 linux.sb（烧饼社区）站的每日自动签到脚本。NodeSeek / DeepFlood 使用 Selenium 和 undetected-chromedriver 实现自动化操作，linux.sb 无 Cloudflare 防护，用纯 requests 签到（`linuxsb_daily.py`）。三站可顺序执行、一站失败不影响其他站。
 
 强烈建议修改随机词。否则容易被举报被禁言。有能力的可以fork后自己定义改。
 
 ## 功能特点
 
-- 自动签到（点击签到图标）
+- NodeSeek / DeepFlood / linux.sb 多站自动签到
 - 自动点击"试试手气"或"鸡腿 x 5"按钮（可配置）
 - 随机选择帖子进行评论
 - 自动给帖子加鸡腿（7天内的帖子）
@@ -25,17 +25,19 @@
 - `HEADLESS`: 是否使用无头模式，true/false（可选，默认 true）。**注意 GitHub Actions 中需用有头模式（`false`）配合 xvfb 才能通过 Cloudflare 挑战**，workflow 已硬编码为 `false`，本地无显示环境时可用 `true`
 - `NS_EXTRA_TASKS`: 除签到外的任务（评论、加鸡腿）总开关，true/false（可选，**默认 false**）
 - `DEEPFLOOD_COOKIE`: DeepFlood 子站的 Cookie（可选）。配置后会自动追加签到第二站；两站用同一套代码、同样页面结构，仅域名与 cookie 不同
-- `SITE_GAP_MIN` / `SITE_GAP_MAX`: 两站签到之间的随机延迟范围（秒，可选，默认 60-180），降低连续签到被风控的概率
+- `LINUXSB_COOKIE`: linux.sb（烧饼社区）的 Cookie（可选）。配置后会在 NodeSeek / DeepFlood 之后追加签到一站；该站无 Cloudflare 防护，用纯 requests 签到（`linuxsb_daily.py`）。多账号用 `&` 分隔（`cookie1&cookie2`），依次签到、单账号失败不中断
+- `SITE_GAP_MIN` / `SITE_GAP_MAX`: 各站签到之间的随机延迟范围（秒，可选，默认 60-180），降低连续签到被风控的概率
 
 布尔类型变量接受 `true`/`1`/`yes`/`on`/`y`（大小写不敏感）为真，其余值一律为假。
 
 ### 关于多站点签到
 
-DeepFlood 是 NodeSeek 的子站，同一套论坛代码、同样的页面结构，只是独立域名与独立登录态。配置 `DEEPFLOOD_COOKIE` 后：
+DeepFlood 是 NodeSeek 的子站，同一套论坛代码、同样的页面结构，只是独立域名与独立登录态。linux.sb（烧饼社区）则是独立的 NodeBB 类论坛，无 Cloudflare 防护。各站配置情况：
 
-- 两站共用同一个浏览器实例，各自注入自己的 cookie 后签到，互不干扰
-- 第二站开始前会先随机等待 `SITE_GAP_MIN`~`SITE_GAP_MAX` 秒，避免两次签到紧挨着被判定为机器批量行为
-- 通知按站点分段显示，各带自己的等级与鸡腿数
+- 配置 `DEEPFLOOD_COOKIE`：NodeSeek 与 DeepFlood 共用同一个浏览器实例，各自注入自己的 cookie 后签到，互不干扰
+- 配置 `LINUXSB_COOKIE`：NodeSeek / DeepFlood 完成后，workflow 追加执行 `linuxsb_daily.py` 完成第三站签到（纯 requests，无需浏览器）
+- 无论配置几站，站与站之间都会随机等待 `SITE_GAP_MIN`~`SITE_GAP_MAX` 秒，避免两次签到紧挨着被判定为机器批量行为
+- 通知按站点分段显示，各自带自己的签到结果
 
 ### 关于 NS_EXTRA_TASKS
 
@@ -106,8 +108,9 @@ NodeSeek 每日任务
 2. 在仓库的 Settings -> Secrets and variables -> Actions 中添加 Secret `NS_COOKIE`
 3. 可选：添加 `NS_RANDOM` 设置是否随机选择奖励
 4. 可选：需要评论和加鸡腿时，添加 `NS_EXTRA_TASKS=true`（不配置则只签到）
-5. 可选：添加通知渠道的 Secrets（如 `WECOM_WEBHOOK` 或 `TG_BOT_TOKEN` + `TG_USER_ID`），workflow 已预置全部通知变量，未添加的自动跳过
-6. Actions 会在每天 UTC 00:00（北京时间 08:00）自动运行，也可在 Actions 页面手动触发（workflow_dispatch）
+5. 可选：配置多站签到 `DEEPFLOOD_COOKIE` / `LINUXSB_COOKIE`（不配置则只签 NodeSeek 一站；linux.sb 多账号用 `&` 分隔）
+6. 可选：添加通知渠道的 Secrets（如 `WECOM_WEBHOOK` 或 `TG_BOT_TOKEN` + `TG_USER_ID`），workflow 已预置全部通知变量，未添加的自动跳过
+7. Actions 会在每天 UTC 00:00（北京时间 08:00）自动运行，也可在 Actions 页面手动触发（workflow_dispatch）
 
 `NS_EXTRA_TASKS` 和 `NS_RANDOM` 这类非敏感开关既可以放在 Variables 也可以放在 Secrets，workflow 会优先取 Variables。放在 Variables 的好处是能在页面上直接看到当前值。
 

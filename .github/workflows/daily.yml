@@ -14,8 +14,25 @@ jobs:
     runs-on: ubuntu-latest
     # 设定时区为北京时间，使脚本内 time.localtime/strftime 输出 UTC+8，
     # 通知里的"执行时间"不再显示 UTC，与签到自然日对齐。
+    # 通知与站间延迟变量放在 job 级：NodeSeek 与 LinuxSB 两个步骤共用，
+    # 避免同一组变量在两个步骤里重复声明。
     env:
       TZ: Asia/Shanghai
+      # 两站签到间随机延迟范围（秒，默认 60-180），可调以降低被风控概率
+      SITE_GAP_MIN: ${{ vars.SITE_GAP_MIN }}
+      SITE_GAP_MAX: ${{ vars.SITE_GAP_MAX }}
+      # Telegram 通知（可选）
+      TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+      TG_USER_ID: ${{ secrets.TG_USER_ID }}
+      TG_API_HOST: ${{ secrets.TG_API_HOST }}
+      TG_PROXY: ${{ secrets.TG_PROXY }}
+      # 企业微信群机器人通知（可选）
+      WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
+      # 企业微信自建应用通知（可选）
+      WECOM_CORPID: ${{ secrets.WECOM_CORPID }}
+      WECOM_CORPSECRET: ${{ secrets.WECOM_CORPSECRET }}
+      WECOM_AGENTID: ${{ secrets.WECOM_AGENTID }}
+      WECOM_TOUSER: ${{ secrets.WECOM_TOUSER }}
 
     steps:
       - name: Checkout repository
@@ -56,20 +73,15 @@ jobs:
           # 注意 secret 名是 DEEPFLOOD_COOKIE（DEEP），须与拼写完全一致，
           # 之前曾误写为 DEPFLOOD_COOKIE 导致取不到值。
           DEEPFLOOD_COOKIE: ${{ secrets.DEEPFLOOD_COOKIE }}
-          # 两站签到间随机延迟范围（秒，默认 60-180），可调以降低被风控概率
-          SITE_GAP_MIN: ${{ vars.SITE_GAP_MIN }}
-          SITE_GAP_MAX: ${{ vars.SITE_GAP_MAX }}
-          # Telegram 通知（可选）
-          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-          TG_USER_ID: ${{ secrets.TG_USER_ID }}
-          TG_API_HOST: ${{ secrets.TG_API_HOST }}
-          TG_PROXY: ${{ secrets.TG_PROXY }}
-          # 企业微信群机器人通知（可选）
-          WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
-          # 企业微信自建应用通知（可选）
-          WECOM_CORPID: ${{ secrets.WECOM_CORPID }}
-          WECOM_CORPSECRET: ${{ secrets.WECOM_CORPSECRET }}
-          WECOM_AGENTID: ${{ secrets.WECOM_AGENTID }}
-          WECOM_TOUSER: ${{ secrets.WECOM_TOUSER }}
         run: |
           xvfb-run -a --server-args="-screen 0 1920x1080x24" python nodeseek_daily.py
+
+      # linux.sb（烧饼社区）与 NodeSeek 站不同：无 Cloudflare 防护，纯 requests 签到，
+      # 不需要浏览器与 xvfb。脚本内部会在签到前按 SITE_GAP_MIN/MAX 随机延迟，
+      # 与上一站拉开时间间隔。
+      - name: Run LinuxSB script
+        env:
+          # linux.sb 签到 cookie（可选，配置后三站顺序签到）
+          LINUXSB_COOKIE: ${{ secrets.LINUXSB_COOKIE }}
+          # 通知渠道与 SITE_GAP_* 在 job 级 env 已注入，notify.py 读取同一组变量
+        run: python linuxsb_daily.py
