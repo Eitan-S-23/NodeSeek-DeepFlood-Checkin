@@ -275,7 +275,7 @@ def run():
     """
     执行 linux.sb 每日签到并推送通知，返回进程退出码（全部成功为 0，否则为 1）。
     多个账号（& 分隔）依次签到：单个账号失败不中断其余账号。
-    通知格式对齐 nodeseek_daily：顶部任务执行时间 + 站点分段 + 各账号概览行。
+    通知格式对齐 nodeseek_daily：每个账号一段，段首带「签到时间」与概览行。
     """
     raw_cookies = os.getenv("LINUXSB_COOKIE", "").strip()
     if not raw_cookies:
@@ -307,14 +307,14 @@ def run():
         results.append((success, summary))
         sections.append(
             f"{display}\n"
-            f"执行时间: {started_at}\n"
+            f"签到时间: {started_at}\n"
             f"{summary}"
         )
 
     all_success = all(success for success, _ in results)
     title = "LinuxSB 每日任务" + ("" if all_success else "（签到异常）")
-    # 通知不输出站点域名与任务级执行时间：单站通知里任务级时间与本账号
-    # 执行时间语义重叠且相差随机延迟，反而容易误读成两个不同时刻
+    # 通知不输出站点域名与任务开始时间：linux.sb 只有一站，任务的开始时间
+    # 与本账号的签到时间语义重叠且相差随机延迟，只保留账号级「签到时间」
     content = "\n\n".join(sections)
     notify.send(title, content)
     return 0 if all_success else 1

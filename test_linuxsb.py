@@ -290,7 +290,7 @@ class RunTestCase(unittest.TestCase):
         self.assertEqual(send_mock.call_args.args[0], "LinuxSB 每日任务")
 
     def test_通知内容对齐nodeseek分段格式(self):
-        """通知含各账号执行时间与概览；【linux.sb】域名与任务级时间不进通知"""
+        """通知含各账号签到时间与概览；【linux.sb】域名不进通知"""
         import os
 
         os.environ["LINUXSB_COOKIE"] = "a=1"
@@ -301,7 +301,7 @@ class RunTestCase(unittest.TestCase):
             code = daily.run()
         self.assertEqual(code, 0)
         content = send_mock.call_args.args[1]
-        self.assertIn("执行时间: ", content)
+        self.assertIn("签到时间: ", content)
         self.assertNotIn("【linux.sb】", content)
         self.assertNotIn("linux.sb", content)  # 站点域名不进入通知
         self.assertIn("账号 1", content)

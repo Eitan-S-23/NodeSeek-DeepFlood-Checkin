@@ -692,14 +692,15 @@ def build_notify_content(site_results, task_started_at=None):
 
     site_results: [(site, sign_result, comment_stats, account_summary, started_at), ...]
     单站点时仍按原排版输出，多站点时每站一段、用分隔线隔开。
-    顶部为任务启动时间（早于各站签到时间），每站段首带本站签到开始时间，
+    顶部为「任务开始时间」（早于各站签到时间），每站段首带本站「签到时间」，
     多站时可直观看出两站间隔与延迟。
     """
-    # 顶部时间默认回退到当前时刻，保持单测和旧调用兼容
-    lines = [f"执行时间: {task_started_at or time.strftime('%Y-%m-%d %H:%M:%S')}"]
+    # 顶部时间默认回退到当前时刻，保持单测和旧调用兼容；
+    # 与各站段内的「签到时间」用不同前缀区分，避免接到一条通知里时语义混淆
+    lines = [f"任务开始时间: {task_started_at or time.strftime('%Y-%m-%d %H:%M:%S')}"]
 
     def render_site(site, sign_result, comment_stats, account_summary, started_at, header):
-        block = [header, f"执行时间: {started_at}", f"签到结果: {sign_result['detail']}"]
+        block = [header, f"签到时间: {started_at}", f"签到结果: {sign_result['detail']}"]
 
         if account_summary:
             if account_summary.get('level'):
