@@ -235,7 +235,13 @@ def browser_login(creds):
         submit.click()
         wait.until(lambda d: "login" not in d.current_url)
 
-        cookies = driver.get_cookies()
+        # 只导出当前站点域的 cookie：get_cookies() 会返回全部域名（含 CDN、
+        # 统计等其他域的同名 cookie），一并注入 requests 会互相覆盖导致登录态丢失
+        host = BASE_URL.split("://", 1)[1]
+        cookies = [
+            c for c in driver.get_cookies()
+            if c.get("domain", "").lstrip(".").endswith(host)
+        ]
         if not cookies:
             raise RuntimeError("登录后未取到任何 Cookie，可能登录被防爬拦截")
         cookie_str = "; ".join(f"{c['name']}={c['value']}" for c in cookies)
@@ -292,7 +298,7 @@ def fetch_checkin_state(cookie):
 
 
 def send_checkin_request(cookie, csrf):
-    """执行签到 POST 请求，返回服务端 JSON 响应（解析失败抛异常）。"""
+    """执行签到 POST 请求，返回完整 Response（调用方负责解析 JSON）。"""
     response = requests.post(
         CHECKIN_URL,
         headers=POST_HEADERS,
@@ -302,7 +308,24 @@ def send_checkin_request(cookie, csrf):
     )
     if response.status_code != 200:
         raise RuntimeError(f"签到请求失败，HTTP {response.status_code}")
-    return response.json()
+    return response
+
+
+def merge_response_cookies(cookie_str, response):
+    """
+    把签到 POST 响应中新签发的 cookie（服务端可能在签到/登录时轮换会话）
+    合并进原 cookie 字符串，供后续概览 GET 使用，避免旧会话失效被踢回登录页。
+    """
+    new_cookies = getattr(response, "cookies", None)
+    if not new_cookies:
+        return cookie_str
+    merged = parse_cookies(cookie_str)
+    for name, value in new_cookies.items():
+        merged[name] = value
+    updated = "; ".join(f"{k}={v}" for k, v in merged.items())
+    if updated != cookie_str:
+        print("[linux.sb] 服务端轮换了会话 cookie，已合并用于概览获取")
+    return updated
 
 
 def extract_checkin_meta(html):
@@ -412,7 +435,10 @@ def sign_in_account(cookie):
         summary, username = _build_summary(["签到结果: 今日已签到，无需重复签到"], cookie)
         return True, summary, username
 
-    result = send_checkin_request(cookie, csrf)
+    response = send_checkin_request(cookie, csrf)
+    # 服务端可能在签到响应中轮换会话 cookie，先合并再用后续请求
+    cookie = merge_response_cookies(cookie, response)
+    result = response.json()
     if result.get("ok") in (1, True, "1", "true"):
         message = result.get("message", "")
         # POST 响应中 ok/message 之外的字段一并展示（不同站点版本字段名不同）；
