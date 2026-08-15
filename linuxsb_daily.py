@@ -252,16 +252,20 @@ def browser_sign_in(creds):
         # 蜜罐字段 native_captcha_company 保持为空（伪装真人必须留空）
         submit = driver.find_element(By.CSS_SELECTOR, "form button[type=submit], form button")
         submit.click()
-        # 登录成功的可靠特征：登录态页面必然出现用户卡（user-name class）。
-        # 不能只看 URL 是否离开 /login——登录失败时页面可能跳转到不含 "login"
-        # 的地址（如首页），只判 URL 会把失败误判为成功，随后匿名 POST 签到
-        # 又会被服务端以 ok:1 的假成功回应，造成「未登录却签到成功」的假象
-        wait.until(lambda d: "user-name" in (d.page_source or ""))
+        # 登录成功的可靠特征：登录表单（password 输入框）从页面消失。
+        # 不能依赖 URL 离开 /login 或 user-name 元素——登录失败后可能跳到
+        # 不含 "login" 的地址（如搜索页），而未登录的搜索/榜单页也含
+        # user-name 站点用户卡，两种特征都会把失败误判为成功，导致随后的
+        # 匿名 POST 被服务端以 ok:1 假成功回应
+        wait.until(lambda d: 'name="password"' not in (d.page_source or ""))
         print(f"[linux.sb] 账号密码登录成功（URL {driver.current_url}），开始签到")
 
         # 以同一浏览器会话访问签到页并执行签到
         driver.get(CHECKIN_URL)
         wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'input[name="_csrf"]')))
+        # 保险：签到页仍重定向到登录页说明登录态未生效，明确失败而不匿名假签到
+        if "/login" in driver.current_url:
+            raise RuntimeError("登录态未生效：签到页仍重定向到登录页")
 
         lines = []
         if CHECKED_IN_TEXT in driver.page_source:
