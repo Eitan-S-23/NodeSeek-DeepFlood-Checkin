@@ -151,21 +151,45 @@ def extract_checkin_meta(html):
     return found
 
 
-# 登录态导航栏的用户名链接（/user/<id> 等），取其链接文本作为账号名
-USERNAME_LINK_RE = re.compile(
-    r'href="[^"]*/(?:user|member|profile|u)/\d+[^"]*"[^>]*>([^<]{1,32})</a>',
-    re.IGNORECASE,
+# 用户名候选模式（按优先级）：
+# 1. 该论坛程序（bbs1 同源）的个人信息卡结构，登录态各页面通用
+# 2. 用户主页链接的文本
+USERNAME_PATTERNS = (
+    re.compile(r'class="user-name"[^>]*>([^<]{1,32})</a>'),
+    re.compile(
+        r'href="[^"]*/(?:user|member|profile|u)/\d+[^"]*"[^>]*>([^<]{1,32})</a>',
+        re.IGNORECASE,
+    ),
 )
 
 
 def extract_username(html):
     """从登录态页面提取用户名；页面无法解析（含未登录）时返回 None。"""
-    match = USERNAME_LINK_RE.search(html)
-    if match:
-        name = match.group(1).strip()
-        if name:
-            return name
+    for pattern in USERNAME_PATTERNS:
+        match = pattern.search(html)
+        if match:
+            name = match.group(1).strip()
+            if name:
+                return name
     return None
+
+
+def _debug_dump_checkin_area(html):
+    """
+    调试辅助：LINUXSB_DEBUG=1 时打印「当前积分」附近的页面片段（已脱敏），
+    便于按实际页面结构调整用户名/积分解析正则。
+    """
+    if os.getenv("LINUXSB_DEBUG", "") != "1":
+        return
+    for keyword in ("当前积分", "积分"):
+        pos = html.find(keyword)
+        if pos != -1:
+            start = max(0, pos - 250)
+            segment = html[start:pos + 120]
+            # 脱敏：CSRF token 与 cookie 相关值不落入日志
+            segment = re.sub(r'name="_csrf"\s+value="[^"]*"', 'name="_csrf" value="***"', segment)
+            print(f"[linux.sb][debug] {keyword} 附近页面片段：\n{segment}")
+            break
 
 
 def sign_in_account(cookie):
@@ -239,6 +263,7 @@ def _build_summary(lines, cookie):
         username = extract_username(html)
         for label, value in extract_checkin_meta(html):
             lines.append(f"{label}: {value}")
+        _debug_dump_checkin_area(html)
     # 抓不到概览信息时至少注明原因，避免通知里只有孤零零一行结果
     if len(lines) == 1:
         lines.append("概览信息: 未从页面取到（模板差异或 Cookie 权限不足）")

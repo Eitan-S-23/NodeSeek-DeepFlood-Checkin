@@ -179,8 +179,20 @@ class ExtractUsernameTestCase(unittest.TestCase):
                 '<span>每日签到</span>')
         self.assertEqual(daily.extract_username(html), "小明同学")
 
-    def test_无用户链接时返回None(self):
+    def test_从个人信息卡提取用户名(self):
+        """同源论坛程序的 user-name 卡片结构（登录态各页面通用）"""
+        html = ('<div class="user-card">'
+                '<a class="user-name" href="/user/42">烧饼爱好者</a>'
+                '</div><div>当前积分：888</div>')
+        self.assertEqual(daily.extract_username(html), "烧饼爱好者")
+
+    def test_无用户信息时返回None(self):
         self.assertIsNone(daily.extract_username("<html>请先登录</html>"))
+
+    def test_卡片结构优先于链接(self):
+        html = ('<a class="user-name" href="/user/42">卡片用户名</a>'
+                '<a href="/user/41">别人</a>')
+        self.assertEqual(daily.extract_username(html), "卡片用户名")
 
 
 class ExtractUsernameRunTestCase(unittest.TestCase):
