@@ -76,9 +76,11 @@ jobs:
         run: |
           xvfb-run -a --server-args="-screen 0 1920x1080x24" python nodeseek_daily.py
 
-      # linux.sb（烧饼社区）无 Cloudflare 防护，签到与账号密码兜底登录都是纯
-      # requests（登录链路的算术题 + PoW 已在脚本内本地计算，无需浏览器）。
-      # 无需 xvfb/浏览器显示环境，与 NodeSeek 步骤共用同一 runner 即可。
+      # linux.sb（烧饼社区）无 Cloudflare 防护，签到本身用纯 requests；仅当
+      # LINUXSB_COOKIE 失效需要账号密码兜底登录时才启动浏览器（登录验证码的
+      # answer 哈希算法在服务端且 bbs1 后端未开源，纯 requests 无法复刻）。
+      # 用 xvfb-run 提供虚拟显示，配合 HEADLESS=false 走有头浏览器，与 NodeSeek
+      # 步骤同一配比（--headless=new 与 xvfb 叠加会令元素定位卡死）。
       - name: Run LinuxSB script
         env:
           # linux.sb 签到 cookie（可选，配置后三站顺序签到）
@@ -86,6 +88,8 @@ jobs:
           # 账号密码兜底登录（可选）：cookie 缺失或失效时自动登录，
           # 格式为 JSON：{"username":"xx","password":"yy"}
           LINUXSB_ACCOUNT: ${{ secrets.LINUXSB_ACCOUNT }}
+          # 有头模式 + xvfb 虚拟显示（与 NodeSeek 步骤同配比），浏览器登录更稳定
+          HEADLESS: "false"
           # 通知渠道与 SITE_GAP_* 在 job 级 env 已注入，notify.py 读取同一组变量
         run: |
-          python linuxsb_daily.py
+          xvfb-run -a --server-args="-screen 0 1920x1080x24" python linuxsb_daily.py
