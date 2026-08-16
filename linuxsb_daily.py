@@ -206,8 +206,24 @@ def browser_sign_in(creds):
         driver.get(f"{BASE_URL}/login")
         wait = WebDriverWait(driver, 30)
 
-        # 填入用户名与密码
-        username_input = wait.until(EC.presence_of_element_located((By.NAME, "username")))
+        # 填入用户名与密码。
+        # 注意：这里不能用 EC.presence_of_element_located 等元素（登录页 DOM 明明
+        # 完整渲染、name="username" 就在其中，但 undetected-chromedriver 在 xvfb
+        # 有头环境偶发「导航后 find_element 卡死」——等 30 秒拿不到，异常 Message
+        # 为空，重开浏览器重试仍卡同一处）。改用 execute_script 直接在 DOM 树里
+        # 轮询这个选择器是否真实存在，绕过 UCD 对元素可见性/状态的判定坑。
+        def wait_dom_ready(selector, timeout=30):
+            end = time.time() + timeout
+            while time.time() < end:
+                if driver.execute_script(
+                    "return !!document.querySelector(arguments[0])", selector
+                ):
+                    return True
+                time.sleep(0.5)
+            raise RuntimeError(f"页面元素 {selector} 在 {timeout} 秒内未出现在 DOM")
+
+        wait_dom_ready("[name=username]")
+        username_input = driver.find_element(By.NAME, "username")
         username_input.clear()
         username_input.send_keys(creds["username"])
         password_input = driver.find_element(By.NAME, "password")
@@ -215,10 +231,11 @@ def browser_sign_in(creds):
         password_input.send_keys(creds["password"])
 
         # 读取算术题题面并填入计算结果（例如「9 × 4 = ?」-> 36）
-        question_el = wait.until(
-            EC.visibility_of_element_located((By.CLASS_NAME, "native-captcha-question"))
-        )
+        # 同样用 DOM 轮询（见上方 wait_dom_ready 的理由），避免 UCD 可见性判定坑
+        wait_dom_ready(".native-captcha-question")
+        question_el = driver.find_element(By.CLASS_NAME, "native-captcha-question")
         answer = solve_captcha_question(question_el.text)
+        wait_dom_ready("[name=native_captcha_answer]")
         answer_input = driver.find_element(By.NAME, "native_captcha_answer")
         answer_input.clear()
         answer_input.send_keys(answer)
