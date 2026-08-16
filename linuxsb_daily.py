@@ -173,7 +173,9 @@ def accounts_login(creds):
     纯 requests 账号密码登录 linux.sb，返回登录后会话 cookie 字符串。
 
     链路（对照登录页 plugins.js 的 nativeCaptchaSolve 与表单 submit 逻辑）：
-    1. GET /login 拿 HTML，提取 _csrf、native_captcha_token、pow-prefix/zeroes、算术题题面
+    1. GET /login 拿 HTML，提取 _csrf、native_captcha_token、pow-prefix/zeroes、算术题题面。
+       服务端在此响应 Set-Cookie: bbs_csrf（GET /login 的响应头里），Session 自动收下；
+       登录 POST 需把该 bbs_csrf 作为 cookie 一并带上（服务端按它校验 _csrf 与会话绑定）
     2. 本地解算术题（solve_captcha_question）+ 求 PoW nonce（solve_native_captcha_pow）
     3. POST /login 提交完整表单（_csrf/username/password/native_captcha_answer/
        native_captcha_token/native_captcha_pow，蜜罐 native_captcha_company 留空）
@@ -192,6 +194,12 @@ def accounts_login(creds):
     if resp.status_code != 200:
         raise RuntimeError(f"打开登录页失败：HTTP {resp.status_code}")
     html = resp.text
+
+    # GET /login 响应头 Set-Cookie: bbs_csrf（HttpOnly，Secure），requests.Session
+    # 自动收入 session.cookies。缺失说明站点模板/反爬改版，POST 会因缺会话凭据被拒。
+    if "bbs_csrf" not in session.cookies:
+        print(f"[linux.sb] 警告：GET /login 未收到 bbs_csrf cookie（当前会话 cookie："
+              f"{list(session.cookies.keys())}），登录 POST 可能被服务端拒绝")
 
     csrf = _match_first(_LOGIN_CSRF_RE, html)
     token = _match_first(_CAPTCHA_TOKEN_RE, html)
@@ -225,6 +233,10 @@ def accounts_login(creds):
     login_headers = {
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Content-Type": "application/x-www-form-urlencoded",
+        # 登录是页面 AJAX 提交（对照 plugins.js/index.js 的 fetch 调用），必须带
+        # X-Requested-With 标记，否则服务端按非 AJAX 表单处理可能不返会话 cookie
+        "X-Requested-With": "XMLHttpRequest",
+        "Origin": BASE_URL,
         "Referer": f"{BASE_URL}/login",
         "User-Agent": USER_AGENT,
     }
@@ -236,12 +248,17 @@ def accounts_login(creds):
     except requests.RequestException as exc:
         raise RuntimeError(f"提交登录失败：{exc}") from exc
 
-    final_url = getattr(resp, "url", "") or ""
-    if "/login" in final_url or 'name="password"' in resp.text:
-        # 仍停在登录页：凭据错误、验证码错误或 PoW 校验失败。抓一行错误提示便于定位
+    # 登录成功的可靠特征是响应 Set-Cookie 下了 bbs_auth（登录态会话凭据）。
+    # 不能只看 URL 离开 /login——凭据/验证码/PoW 任一失败服务端也会重定向走，
+    # 但不发 bbs_auth。先按 cookie 判定，再补 URL/密码框兜底。
+    if "bbs_auth" not in session.cookies:
         err = _LOGIN_ERROR_RE.search(resp.text)
         hint = f"（页面提示：{err.group(0)}）" if err else ""
-        raise RuntimeError(f"账号密码登录失败，仍停留在登录页{hint}，请核对用户名/密码或稍后重试")
+        raise RuntimeError(
+            f"账号密码登录失败：登录响应未下发 bbs_auth 会话 cookie"
+            f"（响应 cookie：{list(session.cookies.keys())}）{hint}，"
+            f"请核对用户名/密码或稍后重试"
+        )
 
     # 登录成功只拿到 bbs_auth 一个会话 cookie，但签到页渲染 _csrf 隐藏字段需要
     # bbs_csrf——该 cookie 在登录后的首次页面 GET 时由服务端 Set-Cookie 下发。

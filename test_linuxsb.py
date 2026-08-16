@@ -416,7 +416,7 @@ class AccountsLoginTestCase(unittest.TestCase):
             post_html="<html>登录失败</html>", post_url="https://linux.sb/login", cookies={},
         )
         with patcher:
-            with self.assertRaisesRegex(RuntimeError, "停留在登录页"):
+            with self.assertRaisesRegex(RuntimeError, "未下发 bbs_auth"):
                 daily.accounts_login({"username": "u", "password": "p"})
 
     def test_登录页缺字段抛异常(self):
@@ -426,11 +426,12 @@ class AccountsLoginTestCase(unittest.TestCase):
                 daily.accounts_login({"username": "u", "password": "p"})
 
     def test_登录后无cookie抛异常(self):
+        """POST /login 不带任何会话 cookie 回写（cookies={}）：登录未建立，明确失败"""
         sess, patcher = self._mock_session(
             post_html="<html>首页</html>", post_url="https://linux.sb/", cookies={},
         )
         with patcher:
-            with self.assertRaisesRegex(RuntimeError, "未带会话 cookie"):
+            with self.assertRaisesRegex(RuntimeError, "未下发 bbs_auth"):
                 daily.accounts_login({"username": "u", "password": "p"})
 
     def test_登录态未生效预取签到页被踢回登录页(self):
