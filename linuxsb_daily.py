@@ -209,15 +209,21 @@ def browser_sign_in(creds):
     import undetected_chromedriver as uc
 
     options = uc.ChromeOptions()
-    # linux.sb 无 Cloudflare 防护，无头模式即可通过（Actions 无显示环境必须无头）；
-    # 需要调试时设 HEADLESS=false 配合 xvfb 使用
-    if env_bool("HEADLESS", True):
+    # 浏览器模式与 nodeseek_daily.py 对齐：默认有头 + 外部 xvfb 提供虚拟显示。
+    # 之前默认 --headless=new 与 workflow 的 xvfb-run 虚拟显示叠加，会导致
+    # undetected-chromedriver 导航后 find_element 卡到超时（登录页 DOM 已完整
+    # 渲染却定位不到 name="username"，stage 卡在「打开登录页」，异常 Message 为空）。
+    # 关掉 headless 让 xvfb 显示生效，与每天跑通的 NodeSeek 步骤采用同一配比。
+    # 纯本地无显示环境调试时可显式设 HEADLESS=true 回到无头。
+    if env_bool("HEADLESS", False):
         options.add_argument("--headless=new")
+        options.add_argument("--disable-gpu")
     else:
         options.add_argument("--window-size=1920,1080")
+        # 与 nodeseek_daily 一致：始终降低自动化特征，不覆盖真实 UA
+        options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
 
     # runner 预装的 Chrome 往往落后于最新 chromedriver，版本不匹配会直接抛
     # SessionNotCreatedException；显式传入实际大版本号强制取匹配的驱动
@@ -604,16 +610,26 @@ def run():
             if cookie_valid:
                 # Cookie 有效：走纯 requests 签到路径
                 success, summary, username = sign_in_account(cookie)
-            elif creds and not login_used:
-                # Cookie 缺失或失效：账号密码兜底，在浏览器会话内登录并就地签到
-                print("[linux.sb] 使用账号密码登录并签到")
+            elif creds and env_bool("LINUXSB_USE_BROWSER", False) and not login_used:
+                # 可选实验特性：Cookie 缺失/失效时在 Actions 里驱动浏览器登录。
+                # 默认关闭——该站登录有算术题+PoW 反爬，Actionrunner 无头环境
+                # 不稳定；日常请用 linuxsb_login_tool.py 本地导出新 cookie 更新。
+                print("[linux.sb] 使用账号密码登录并签到（LINUXSB_USE_BROWSER=1）")
                 success, summary, username = browser_sign_in(creds)
                 login_used = True
+            elif creds and not env_bool("LINUXSB_USE_BROWSER", False):
+                # 配置了凭据但未开启浏览器兜底：明确告知如何开启自动登录
+                success, summary, username = False, (
+                    "Cookie 已失效，且浏览器兜底未开启。将环境变量 LINUXSB_USE_BROWSER "
+                    "设为 true（workflow 已默认开启），即可在 Cookie 失效时自动用 "
+                    "账号密码浏览器登录并签到；或在浏览器登录 linux.sb 后复制 Cookie "
+                    "更新 LINUXSB_COOKIE"
+                ), None
             else:
                 # 无有效 cookie 也无可用的兜底凭据：给出明确失效提示
                 success, summary, username = False, (
                     "Cookie 已失效（未配置 LINUXSB_COOKIE 或凭据已用尽），"
-                    "请更新 cookie 或等待凭据兜底"
+                    "请在浏览器登录 linux.sb 后复制 Cookie 更新 LINUXSB_COOKIE"
                 ), None
         except Exception as error:  # 网络异常、登录/签到失败等：单账号失败不影响其余账号
             success, summary, username = False, f"签到异常：{error}", None
