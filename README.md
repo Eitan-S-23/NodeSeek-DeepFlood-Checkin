@@ -26,7 +26,7 @@
 - `NS_EXTRA_TASKS`: 除签到外的任务（评论、加鸡腿）总开关，true/false（可选，**默认 false**）
 - `DEEPFLOOD_COOKIE`: DeepFlood 子站的 Cookie（可选）。配置后会自动追加签到第二站；两站用同一套代码、同样页面结构，仅域名与 cookie 不同
 - `LINUXSB_COOKIE`: linux.sb（烧饼社区）的 Cookie（可选）。配置后会在 NodeSeek / DeepFlood 之后追加签到一站；该站无 Cloudflare 防护，用纯 requests 签到（`linuxsb_daily.py`）。多账号用 `&` 分隔（`cookie1&cookie2`），依次签到、单账号失败不中断
-- `LINUXSB_ACCOUNT`: linux.sb 的账号密码兜底登录（可选），格式为 JSON：`{"username":"你的用户名","password":"你的密码"}`。**Cookie 优先**：`LINUXSB_COOKIE` 有效时完全不用凭据；cookie 缺失或失效时自动用浏览器登录（算术题验证码自动填写），登录成功当场继续签到，无需手动换 cookie
+- `LINUXSB_ACCOUNT`: linux.sb 的账号密码兜底登录（可选），格式为 JSON：`{"username":"你的用户名","password":"你的密码"}`。**Cookie 优先**：`LINUXSB_COOKIE` 有效时完全不用凭据；cookie 缺失或失效时自动用纯 requests 复刻登录链路（算术题本地解 + PoW 本地求 nonce，对照站点 plugins.js 反推），登录成功当场继续签到，无需浏览器、无需手动换 cookie
 - `SITE_GAP_MIN` / `SITE_GAP_MAX`: 各站签到之间的随机延迟范围（秒，可选，默认 60-180），降低连续签到被风控的概率
 
 布尔类型变量接受 `true`/`1`/`yes`/`on`/`y`（大小写不敏感）为真，其余值一律为假。
