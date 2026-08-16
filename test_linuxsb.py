@@ -197,6 +197,37 @@ class ExtractCheckinMetaTestCase(unittest.TestCase):
         self.assertNotIn("积分", found)
 
 
+class CheckinBonusTestCase(unittest.TestCase):
+    """“本次签到获得积分”提取测试（POST 响应字段优先，toast 文案兜底）"""
+
+    def test_从bonus字段取积分(self):
+        self.assertEqual(daily._checkin_bonus({"ok": 1, "bonus": 76}), 76)
+
+    def test_从points字段取积分(self):
+        self.assertEqual(daily._checkin_bonus({"ok": 1, "points": 10}), 10)
+
+    def test_bonus为带符号字符串(self):
+        self.assertEqual(daily._checkin_bonus({"bonus": "+10"}), 10)
+
+    def test_响应无积分字段返回None(self):
+        self.assertIsNone(daily._checkin_bonus({"ok": 1, "message": "签到成功"}))
+
+    def test_非字典响应返回None(self):
+        self.assertIsNone(daily._checkin_bonus(None))
+        self.assertIsNone(daily._checkin_bonus("str"))
+
+    def test_从toast文案取积分(self):
+        html = '签到成功，连续 2 天，获得 76 积分'
+        self.assertEqual(daily._checkin_bonus_from_text(html), "76")
+
+    def test_toast无积分文案返回None(self):
+        self.assertIsNone(daily._checkin_bonus_from_text("<html>无签到文案</html>"))
+
+    def test_toast兼容积分加号变体(self):
+        html = '签到成功，奖励 8 积分'
+        self.assertEqual(daily._checkin_bonus_from_text(html), "8")
+
+
 class ExtractUsernameTestCase(unittest.TestCase):
     """用户名解析测试"""
 

@@ -309,8 +309,15 @@ def browser_sign_in(creds):
                 csrf_to_submit,
             )
             message = result.get("message", "") or ""
+            bonus_from_response = None
             if result.get("ok") in (1, True, "1", "true"):
                 lines.append(f"签到结果: 签到成功{f'（{message}）' if message else ''}")
+                # 尝试从签到 POST 响应里取“本次签到获得的积分数”。字段名随站点版本
+                # 而异（bonus/points/获得积分 等），用 _checkin_bonus 统一兜底提取；
+                # 响应里没有就等刷新签到页后从 toast 文案补（两个来源总有一个命中）。
+                bonus_from_response = _checkin_bonus(result)
+                if bonus_from_response is not None:
+                    lines.append(f"本次签到获得: {bonus_from_response} 积分")
             elif any(word in message for word in ("已签到", "已打卡", "重复签到")):
                 lines.append(f"签到结果: 今日已签到，无需重复签到（服务端：{message}）")
             else:
@@ -330,6 +337,12 @@ def browser_sign_in(creds):
         meta = extract_checkin_meta(html)
         for label, value in meta:
             lines.append(f"{label}: {value}")
+        # 签到 POST 响应没给积分时，从签到页 toast/文案（__pageFlash「签到成功，
+        # 连续 N 天，获得 M 积分」等）补“本次签到获得 N 积分”
+        if bonus_from_response is None:
+            toast_bonus = _checkin_bonus_from_text(html)
+            if toast_bonus is not None:
+                lines.append(f"本次签到获得: {toast_bonus} 积分")
         # 概览提取落空时输出脱敏页面片段，便于按真实 DOM 结构校准提取
         if not meta:
             _debug_dump_checkin_area(html)
@@ -476,6 +489,46 @@ def merge_response_cookies(cookie_str, response):
     if updated != cookie_str:
         print("[linux.sb] 服务端轮换了会话 cookie，已合并用于概览获取")
     return updated
+
+
+# “本次签到获得的积分数”的候选字段名（签到 POST 响应 JSON 里随站点版本而异）
+_CHECKIN_BONUS_FIELDS = ("bonus", "points", "gain", "reward", "score", "earned")
+# 签到页 toast / __pageFlash 文案里“本次签到获得 N 积分”的提取正则。
+# 常见文案（bbs1 v8.6.1）：「签到成功，连续 2 天，获得 76 积分」，
+# 兼容「获得 xx 积分」「奖励 xx 积分」「积分 +xx」等变体。
+_BONUS_TEXT_RE = re.compile(
+    r"(?:获得|获得积分|奖励|积分[＋+]\s*|本次签到获得)\s*[＋+]?\s*(\d+)\s*积分"
+)
+
+
+def _checkin_bonus(result):
+    """
+    从签到 POST 响应 JSON 里提取“本次签到获得的积分数”，返回整数或 None。
+    遍历候选字段名，命中数字则返回；无命中返回 None（由 toast 文案补）。
+    """
+    if not isinstance(result, dict):
+        return None
+    for key in _CHECKIN_BONUS_FIELDS:
+        value = result.get(key)
+        if value is None:
+            continue
+        # 兼容纯数字、字符串数字（可能有 + 前缀，如 "+10"）
+        if isinstance(value, (int, float)):
+            return int(value)
+        if isinstance(value, str):
+            m = re.search(r"[+\+]?\s*(\d+)", value)
+            if m:
+                return int(m.group(1))
+    return None
+
+
+def _checkin_bonus_from_text(html):
+    """
+    从签到页 HTML（toast / __pageFlash 文案）里补“本次签到获得的积分”，
+    返回数字字符串或 None。抓不到不报错，不影响签到结果。
+    """
+    m = _BONUS_TEXT_RE.search(html)
+    return m.group(1) if m else None
 
 
 def extract_checkin_meta(html):
