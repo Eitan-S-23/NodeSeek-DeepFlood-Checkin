@@ -30,6 +30,7 @@ import re
 import random
 import time
 import traceback
+import hashlib
 
 import requests
 
@@ -135,6 +136,126 @@ def solve_captcha_question(text):
     return str(int(result))
 
 
+#登录页算术题反爬由「算术题答案 + PoW 工作量证明」两层组成，二者均可纯本地计算：
+# - 算术题题面如「11 - 4 = ?」，用 solve_captcha_question 直接得出答案
+# - PoW：找 nonce 使 sha256(prefix + ":" + nonce) 十六进制摘要前 N 位为零
+#   （prefix、N 来自登录页 data-pow-prefix / data-pow-zeroes，与 plugins.js
+#    nativeCaptchaSolve 完全同算法）。zeros=3 时几毫秒内可解出。
+def solve_native_captcha_pow(prefix, zeros):
+    """
+    求 linux.sb 登录页 native captcha 的工作量证明 nonce。
+    返回使 sha256(prefix + ':' + nonce) 前 zeros 位十六进制均为 0 的 nonce（十六进制字符串）。
+    与站点 plugins.js 中 nativeCaptchaSolve 算法完全一致：nonce 从 0 起按十六进制递增。
+    2,000,000 次仍解不出（zeros 实际只有 2~5）时抛 RuntimeError，避免无限循环。
+    """
+    target = "0" * zeros
+    for i in range(2_000_000):
+        nonce = format(i, "x")
+        digest = hashlib.sha256((prefix + ":" + nonce).encode("utf-8")).hexdigest()
+        if digest[:zeros] == target:
+            return nonce
+    raise RuntimeError(f"PoW 求解超时：prefix={prefix} zeros={zeros}")
+
+
+# 签到页 / 登录页中提取登录表单各字段（_csrf、native_captcha_token、pow prefix/zeroes、题面）
+# _csrf 字段属性顺序不固定（type/name 可能互换），只锚定 name="_csrf" 与 value="
+_LOGIN_CSRF_RE = re.compile(r'name="_csrf"\s+value="([^"]+)"')
+_CAPTCHA_TOKEN_RE = re.compile(r'name="native_captcha_token"\s+value="([^"]+)"')
+_POW_PREFIX_RE = re.compile(r'data-pow-prefix="([^"]+)"')
+_POW_ZEROES_RE = re.compile(r'data-pow-zeroes="([^"]+)"')
+_QUESTION_RE = re.compile(r'class="native-captcha-question">([^<]+)</div>')
+# 登录失败的页面特征：仍停留在 /login，或出现错误提示区
+_LOGIN_ERROR_RE = re.compile(r'class="[^"]*error[^"]*"|登录失败|用户名或密码|验证码', re.IGNORECASE)
+
+
+def accounts_login(creds):
+    """
+    纯 requests 账号密码登录 linux.sb，返回登录后会话 cookie 字符串。
+
+    链路（对照登录页 plugins.js 的 nativeCaptchaSolve 与表单 submit 逻辑）：
+    1. GET /login 拿 HTML，提取 _csrf、native_captcha_token、pow-prefix/zeroes、算术题题面
+    2. 本地解算术题（solve_captcha_question）+ 求 PoW nonce（solve_native_captcha_pow）
+    3. POST /login 提交完整表单（_csrf/username/password/native_captcha_answer/
+       native_captcha_token/native_captcha_pow，蜜罐 native_captcha_company 留空）
+    4. 跟随重定向后判定登录成功：最终 URL 不再是 /login 且无密码输入框
+
+    返回会话 cookie 字符串（形如 'bbs_auth=...; bbs_csrf=...'），供签到流程复用。
+    登录失败抛 RuntimeError，由调用方捕获写入通知。
+    用 requests.Session 复用连接与自动 cookie 管理，无需手动拼接 Set-Cookie。
+    """
+    session = requests.Session()
+    session.headers.update({"User-Agent": USER_AGENT})
+    try:
+        resp = session.get(f"{BASE_URL}/login", headers=PAGE_HEADERS, timeout=30, allow_redirects=True)
+    except requests.RequestException as exc:
+        raise RuntimeError(f"打开登录页失败：{exc}") from exc
+    if resp.status_code != 200:
+        raise RuntimeError(f"打开登录页失败：HTTP {resp.status_code}")
+    html = resp.text
+
+    csrf = _match_first(_LOGIN_CSRF_RE, html)
+    token = _match_first(_CAPTCHA_TOKEN_RE, html)
+    prefix = _match_first(_POW_PREFIX_RE, html)
+    zeroes_raw = _match_first(_POW_ZEROES_RE, html)
+    question = _match_first(_QUESTION_RE, html)
+    if not all([csrf, token, prefix, zeroes_raw, question]):
+        raise RuntimeError(
+            f"登录页结构变化，未能提取全部反爬字段"
+            f"（csrf={bool(csrf)} token={bool(token)} pow={bool(prefix)}/{bool(zeroes_raw)} "
+            f"question={bool(question)}），请检查 linux.sb 登录页模板"
+        )
+    try:
+        zeros = int(zeroes_raw)
+    except ValueError as exc:
+        raise RuntimeError(f"pow-zeroes 非整数：{zeroes_raw}") from exc
+
+    answer = solve_captcha_question(question)
+    pow_nonce = solve_native_captcha_pow(prefix, zeros)
+    print(f"[linux.sb] 反爬字段就绪：算术题={question.strip()} 答案={answer} pow={prefix[:8]}… zeros={zeros} nonce={pow_nonce}")
+
+    form = {
+        "_csrf": csrf,
+        "username": creds["username"],
+        "password": creds["password"],
+        "native_captcha_answer": answer,
+        "native_captcha_token": token,
+        "native_captcha_pow": pow_nonce,
+        "native_captcha_company": "",  # 蜜罐字段，真人必留空
+    }
+    login_headers = {
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Referer": f"{BASE_URL}/login",
+        "User-Agent": USER_AGENT,
+    }
+    try:
+        resp = session.post(
+            f"{BASE_URL}/login", headers=login_headers, data=form,
+            timeout=30, allow_redirects=True,
+        )
+    except requests.RequestException as exc:
+        raise RuntimeError(f"提交登录失败：{exc}") from exc
+
+    final_url = getattr(resp, "url", "") or ""
+    if "/login" in final_url or 'name="password"' in resp.text:
+        # 仍停在登录页：凭据错误、验证码错误或 PoW 校验失败。抓一行错误提示便于定位
+        err = _LOGIN_ERROR_RE.search(resp.text)
+        hint = f"（页面提示：{err.group(0)}）" if err else ""
+        raise RuntimeError(f"账号密码登录失败，仍停留在登录页{hint}，请核对用户名/密码或稍后重试")
+    # 登录成功：把 Session 累积的全部 cookie 拼成字符串复用
+    cookie_str = "; ".join(f"{k}={v}" for k, v in session.cookies.items())
+    if not cookie_str:
+        raise RuntimeError("登录响应未带会话 cookie，登录态无法建立")
+    print(f"[linux.sb] 账号密码登录成功，获取到 {len(session.cookies)} 个会话 cookie")
+    return cookie_str
+
+
+def _match_first(pattern, text):
+    """正则取第一个捕获组，未命中返回 None。"""
+    m = pattern.search(text)
+    return m.group(1) if m else None
+
+
 # 与 nodeseek_daily.py 共用的站间随机延迟范围（秒）
 SITE_GAP_MIN = _env_int("SITE_GAP_MIN", 60)
 SITE_GAP_MAX = _env_int("SITE_GAP_MAX", 180)
@@ -168,190 +289,7 @@ def parse_cookies(raw_cookie):
     return cookies
 
 
-def detect_chrome_major_version():
-    """
-    探测 Chrome 大版本号：优先读环境变量 CHROME_MAJOR_VERSION，
-    否则解析 google-chrome --version（与 nodeseek_daily.py 策略一致）。
-    未探测到时返回 None，由 undetected-chromedriver 自动匹配。
-    """
-    import subprocess
 
-    raw = os.getenv("CHROME_MAJOR_VERSION", "").strip()
-    if raw.isdigit():
-        return int(raw)
-    try:
-        result = subprocess.run(
-            ["google-chrome", "--version"],
-            capture_output=True, text=True, timeout=10,
-        )
-        match = re.search(r"(\d+)\.", result.stdout)
-        if match:
-            return int(match.group(1))
-    except (OSError, subprocess.SubprocessError):
-        pass
-    return None
-
-
-def browser_sign_in(creds):
-    """
-    账号密码兜底登录并就地签到，返回 (成功与否, 结果摘要, 用户名或 None)。
-
-    与 requests 签到路径的区别：登录成功后在同一个浏览器会话内直接访问
-    签到页，并用页面内 fetch 发起签到 POST——不经过 cookie 导出/拼接/重发
-    环节，登录态天然一致（此前多次尝试 cookie 导出到 requests 均无法复现
-    登录态，故放弃该路线）。算术题验证码由脚本解析填写，PoW 由页面 JS 计算。
-    浏览器库（selenium/undetected_chromedriver 等）函数内局部导入，保证未
-    安装浏览器依赖时纯 requests 签到仍可正常使用。
-    """
-    from selenium.webdriver.common.by import By
-    from selenium.webdriver.support.ui import WebDriverWait
-    from selenium.webdriver.support import expected_conditions as EC
-    import undetected_chromedriver as uc
-
-    options = uc.ChromeOptions()
-    # 浏览器模式与 nodeseek_daily.py 对齐：默认有头 + 外部 xvfb 提供虚拟显示。
-    # 之前默认 --headless=new 与 workflow 的 xvfb-run 虚拟显示叠加，会导致
-    # undetected-chromedriver 导航后 find_element 卡到超时（登录页 DOM 已完整
-    # 渲染却定位不到 name="username"，stage 卡在「打开登录页」，异常 Message 为空）。
-    # 关掉 headless 让 xvfb 显示生效，与每天跑通的 NodeSeek 步骤采用同一配比。
-    # 纯本地无显示环境调试时可显式设 HEADLESS=true 回到无头。
-    if env_bool("HEADLESS", False):
-        options.add_argument("--headless=new")
-        options.add_argument("--disable-gpu")
-    else:
-        options.add_argument("--window-size=1920,1080")
-        # 与 nodeseek_daily 一致：始终降低自动化特征，不覆盖真实 UA
-        options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-
-    # runner 预装的 Chrome 往往落后于最新 chromedriver，版本不匹配会直接抛
-    # SessionNotCreatedException；显式传入实际大版本号强制取匹配的驱动
-    driver_kwargs = {}
-    version_main = detect_chrome_major_version()
-    if version_main:
-        print(f"[linux.sb] 检测到 Chrome 大版本 {version_main}，使用匹配的驱动")
-        driver_kwargs["version_main"] = version_main
-
-    driver = uc.Chrome(options=options, **driver_kwargs)
-    stage = "打开登录页"
-    try:
-        driver.get(f"{BASE_URL}/login")
-        wait = WebDriverWait(driver, 30)
-
-        # 填入用户名与密码
-        username_input = wait.until(EC.presence_of_element_located((By.NAME, "username")))
-        username_input.clear()
-        username_input.send_keys(creds["username"])
-        password_input = driver.find_element(By.NAME, "password")
-        password_input.clear()
-        password_input.send_keys(creds["password"])
-
-        # 读取算术题题面并填入计算结果（例如「9 × 4 = ?」-> 36）
-        question_el = wait.until(
-            EC.visibility_of_element_located((By.CLASS_NAME, "native-captcha-question"))
-        )
-        answer = solve_captcha_question(question_el.text)
-        answer_input = driver.find_element(By.NAME, "native_captcha_answer")
-        answer_input.clear()
-        answer_input.send_keys(answer)
-
-        # 蜜罐字段 native_captcha_company 保持为空（伪装真人必须留空）
-        # 提交按钮必须从密码输入框所在的登录表单内找：登录页顶部还有
-        # .search-form（搜索框，action=/index.php），用全局 form button
-        # 选择器会匹配到搜索按钮——曾因此点击了搜索而非登录，跳到空搜索页
-        # （index.php?field=title&q=）且被误判为登录成功
-        login_form = password_input.find_element(By.XPATH, "ancestor::form[1]")
-        submit = login_form.find_element(By.CSS_SELECTOR, "button[type=submit], button")
-        submit.click()
-        # 登录成功的可靠特征：登录表单（password 输入框）从页面消失。
-        # 该站登录表单只在 /login 呈现，登录成功后其他页面不再有密码输入框；
-        # 登录失败停留在 /login（表单恒在）会在此超时并明确报错
-        wait.until(lambda d: 'name="password"' not in (d.page_source or ""))
-        print(f"[linux.sb] 账号密码登录成功（URL {driver.current_url}），开始签到")
-
-        # 以同一浏览器会话访问签到页并执行签到
-        stage = "访问签到页"
-        driver.get(CHECKIN_URL)
-        # 签到页加载完成的稳定标志：摘要面板 .daily-checkin-page-panel 或用户卡
-        # .user-card（登录态必居其一）。原先等 input[name="_csrf"] 会因登录后
-        # 签到页不含该字段而超时——_csrf 只在登录页/未登录态渲染。
-        stage = "等待签到页加载"
-        wait.until(lambda d: d.find_elements(By.CSS_SELECTOR,
-                    ".daily-checkin-page-panel, .user-card"))
-        # 保险：签到页仍重定向到登录页说明登录态未生效，明确失败而不匿名假签到
-        if "/login" in driver.current_url:
-            raise RuntimeError("登录态未生效：签到页仍重定向到登录页")
-
-        lines = []
-        if CHECKED_IN_TEXT in driver.page_source:
-            lines.append("签到结果: 今日已签到，无需重复签到")
-        else:
-            stage = "执行签到请求（页面内 fetch）"
-            driver.set_script_timeout(20)
-            result = driver.execute_async_script(
-                "const done = arguments[arguments.length - 1];"
-                "/* csrf 优先取页面隐藏字段，登录后签到页可能不渲染该字段，"
-                "   退回到 cookie 中的 bbs_csrf（与 requests 路径同一兜底策略） */"
-                "let csrf = (document.querySelector('input[name=\"_csrf\"]') || {}).value || '';"
-                "if (!csrf) {"
-                "  const m = document.cookie.match(/(?:^|;\\s*)bbs_csrf=([^;]+)/);"
-                "  csrf = m ? decodeURIComponent(m[1]) : '';"
-                "}"
-                "fetch('/daily_checkin', {"
-                "  method: 'POST',"
-                "  headers: {"
-                "    'Content-Type': 'application/x-www-form-urlencoded',"
-                "    'X-Requested-With': 'XMLHttpRequest'"
-                "  },"
-                "  body: '_csrf=' + encodeURIComponent(csrf)"
-                "}).then(r => r.json()).then(done).catch(e => done({ok: 0, message: String(e)}));"
-            )
-            message = result.get("message", "") or ""
-            if result.get("ok") in (1, True, "1", "true"):
-                lines.append(f"签到结果: 签到成功{f'（{message}）' if message else ''}")
-            elif any(word in message for word in ("已签到", "已打卡", "重复签到")):
-                lines.append(f"签到结果: 今日已签到，无需重复签到（服务端：{message}）")
-            else:
-                hint = "（Cookie 可能已失效，请重新登录 linux.sb）" if "过期" in message else ""
-                return False, f"签到失败：{message}{hint}", None
-
-        # 刷新签到页提取用户名/积分/连续签到概览
-        stage = "刷新签到页提取概览"
-        driver.refresh()
-        # 登录后的签到页 DOM 不含 input[name="_csrf"]（该隐藏字段只在登录页/未登录态
-        # 出现），原先用 _csrf 等待会 30 秒超时并失败。改等签到页稳定标志：摘要面板
-        # .daily-checkin-page-panel 或用户卡 .user-card，二者登录态必居其一。
-        wait.until(lambda d: d.find_elements(By.CSS_SELECTOR,
-                    ".daily-checkin-page-panel, .user-card"))
-        print(f"[linux.sb] 签到页：URL {driver.current_url}，标题「{driver.title}」")
-        html = driver.page_source
-        meta = extract_checkin_meta(html)
-        for label, value in meta:
-            lines.append(f"{label}: {value}")
-        # 概览提取落空时输出脱敏页面片段，便于按真实 DOM 结构校准提取
-        if not meta:
-            _debug_dump_checkin_area(html)
-        if len(lines) == 1:
-            lines.append("概览信息: 未从页面取到（模板差异或页面权限不足）")
-        print(f"[linux.sb] 浏览器签到完成：{lines[0]}")
-        return True, "\n".join(lines), extract_username(html)
-    except Exception as exc:
-        # 失败时采集页面快照（已脱敏），便于定位超时/报错时的真实页面形态
-        try:
-            live_url = driver.current_url
-            live_src = driver.page_source or ""
-        except Exception:
-            live_url, live_src = "?", ""
-        print(f"[linux.sb] 失败时页面：URL {live_url}，长度 {len(live_src)}")
-        if live_src:
-            _debug_dump_checkin_area(live_src)
-        raise RuntimeError(f"浏览器登录/签到失败（{stage}、URL {live_url}）：{exc}") from exc
-    finally:
-        try:
-            driver.quit()
-        except Exception:
-            pass
 
 
 def fetch_checkin_state(cookie):
@@ -615,30 +553,26 @@ def run():
         # 记录本账号开始签到的时间，写入通知，便于核对执行时点
         started_at = time.strftime("%Y-%m-%d %H:%M:%S")
         try:
+            # 先探测当前账号 cookie 是否有效：有效直接签到；失效则转到账号密码登录。
+            # fetch_checkin_state 内部 GET 签到页，登录态缺失会被 302 到 /login，
+            # 据此判定 cookie_valid。仅 LINUXSB_COOKIE 阳性账号探测，缺 cookie 则跳过。
+            cookie_valid = False
             if cookie:
                 csrf, _checked_in, is_login = fetch_checkin_state(cookie)
                 cookie_valid = csrf is not None and not is_login
-            else:
-                cookie_valid = False
 
             if cookie_valid:
                 # Cookie 有效：走纯 requests 签到路径
                 success, summary, username = sign_in_account(cookie)
-            elif creds and env_bool("LINUXSB_USE_BROWSER", False) and not login_used:
-                # 可选实验特性：Cookie 缺失/失效时在 Actions 里驱动浏览器登录。
-                # 默认关闭——该站登录有算术题+PoW 反爬，Actionrunner 无头环境
-                # 不稳定；日常请用 linuxsb_login_tool.py 本地导出新 cookie 更新。
-                print("[linux.sb] 使用账号密码登录并签到（LINUXSB_USE_BROWSER=1）")
-                success, summary, username = browser_sign_in(creds)
+            elif creds and not login_used:
+                # Cookie 缺失/失效：纯 requests 账号密码登录拿会话 cookie，再走签到。
+                # 登录链路对照登录页 plugins.js 反推：算术题本地解 + PoW 本地求 nonce，
+                # 无需 undetected-chromedriver（其在 Actions 无头环境偶发导航卡死，
+                # 稳定性不可控）。凭据登录最多补一次，多账号同时失效时只救第一个。
+                print("[linux.sb] Cookie 失效，使用账号密码登录并签到")
+                cookie = accounts_login(creds)
                 login_used = True
-            elif creds and not env_bool("LINUXSB_USE_BROWSER", False):
-                # 配置了凭据但未开启浏览器兜底：明确告知如何开启自动登录
-                success, summary, username = False, (
-                    "Cookie 已失效，且浏览器兜底未开启。将环境变量 LINUXSB_USE_BROWSER "
-                    "设为 true（workflow 已默认开启），即可在 Cookie 失效时自动用 "
-                    "账号密码浏览器登录并签到；或在浏览器登录 linux.sb 后复制 Cookie "
-                    "更新 LINUXSB_COOKIE"
-                ), None
+                success, summary, username = sign_in_account(cookie)
             else:
                 # 无有效 cookie 也无可用的兜底凭据：给出明确失效提示
                 success, summary, username = False, (
