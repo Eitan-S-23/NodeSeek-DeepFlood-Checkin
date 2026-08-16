@@ -280,11 +280,21 @@ def browser_sign_in(creds):
         else:
             stage = "执行签到请求（页面内 fetch）"
             driver.set_script_timeout(20)
-            # 签到 CSRF 用登录时记住的 login_csrf（本会话令牌）。登录成功后
-            # bbs_csrf cookie 被服务端设成 deleted、签到页也不再渲染 _csrf 字段，
-            # 那两个来源都拿不到有效令牌。cookie 由浏览器会话自动随 fetch 携带，
-            # 服务端按「提交的 _csrf + 携带的 bbs_auth cookie」校验登录态。
-            csrf_to_submit = login_csrf
+            # 签到 CSRF 必须等于当前请求 Cookie 里的 bbs_csrf 值（服务端按两者一致
+            # 校验，与 Cookie 路径 sign_in_account 同一逻辑）。登录表单那个 _csrf 是
+            # 老的，登录成功后服务端把 bbs_csrf 删掉重发、签到页也不再渲染 _csrf 字段；
+            # 所以从当前浏览器 cookie 现场读 bbs_csrf 值作为 _csrf 提交，保证提交值与
+            # 请求携带的 cookie 一致（浏览器会话自动随 fetch 带上 cookie）。
+            bbs_csrf_cookie = next(
+                (c["value"] for c in driver.get_cookies() if c["name"] == "bbs_csrf"), ""
+            )
+            if bbs_csrf_cookie and bbs_csrf_cookie not in ("deleted", "archived"):
+                csrf_to_submit = bbs_csrf_cookie
+            else:
+                # HttpOnly 时 get_cookies 可能读不到，或值被标记失效——回退登录令牌
+                csrf_to_submit = login_csrf
+                print(f"[linux.sb] 警告：bbs_csrf cookie 未取到（{bbs_csrf_cookie!r}），"
+                      f"回退用登录表单 _csrf")
             result = driver.execute_async_script(
                 "const done = arguments[arguments.length - 1];"
                 "const csrf = arguments[0];"
