@@ -382,8 +382,15 @@ class AccountsLoginTestCase(unittest.TestCase):
                     return _Resp(checkin_html, "https://linux.sb/daily_checkin")
                 return _Resp(login_html, "https://linux.sb/login")
 
-            def post(self, url, headers=None, data=None, timeout=None, allow_redirects=True):
-                self.posted = (url, data)
+            def post(self, url, headers=None, data=None, files=None, timeout=None, allow_redirects=True):
+                # multipart 提交时字段在 files（值形如 {key: (None, value)}），
+                # urlencoded 提交时在 data。统一还原成 {key: value} 便于断言。
+                if files:
+                    posted_form = {key: (val[1] if isinstance(val, tuple) else val)
+                                   for key, val in files.items()}
+                else:
+                    posted_form = data or {}
+                self.posted = (url, posted_form, files is not None)
                 return _Resp(post_html, post_url)
 
         sess = _Session()
@@ -400,7 +407,9 @@ class AccountsLoginTestCase(unittest.TestCase):
         self.assertIn("bbs_auth=authed", cookie)
         self.assertIn("bbs_csrf=csrf123", cookie)
         # POST 提交了完整表单，含本地解出的算术题答案与 PoW nonce、蜜罐留空
-        url, data = sess.posted
+        url, data, is_multipart = sess.posted
+        # 真实浏览器用 FormData 提交 multipart/form-data，登录必须用 multipart
+        self.assertTrue(is_multipart, "登录 POST 必须用 multipart/form-data（对齐真实浏览器 FormData）")
         self.assertEqual(data["username"], "u")
         self.assertEqual(data["password"], "p")
         self.assertEqual(data["native_captcha_answer"], "7")  # 11-4

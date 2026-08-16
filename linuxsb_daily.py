@@ -230,9 +230,14 @@ def accounts_login(creds):
         "native_captcha_pow": pow_nonce,
         "native_captcha_company": "",  # 蜜罐字段，真人必留空
     }
+    # 真实浏览器用 new FormData(form) 提交，Content-Type 是 multipart/form-data
+    # （带 boundary），不是 urlencoded。服务端 PHP 按 $_POST 解析时若用 urlencoded
+    # 提交会读不到 native_captcha_* 等字段，导致「验证码」校验失败。requests 用
+    # files={字段: (None, 值)} 即可发出 multipart/form-data，Content-Type 头由
+    # requests 自动生成（含 boundary），不要手写覆盖。
+    multipart_form = {key: (None, value) for key, value in form.items()}
     login_headers = {
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Content-Type": "application/x-www-form-urlencoded",
+        "Accept": "*/*",
         # 登录是页面 AJAX 提交（对照 plugins.js/index.js 的 fetch 调用），必须带
         # X-Requested-With 标记，否则服务端按非 AJAX 表单处理可能不返会话 cookie
         "X-Requested-With": "XMLHttpRequest",
@@ -242,7 +247,7 @@ def accounts_login(creds):
     }
     try:
         resp = session.post(
-            f"{BASE_URL}/login", headers=login_headers, data=form,
+            f"{BASE_URL}/login", headers=login_headers, files=multipart_form,
             timeout=30, allow_redirects=True,
         )
     except requests.RequestException as exc:
