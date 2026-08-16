@@ -338,16 +338,23 @@ class AccountsLoginTestCase(unittest.TestCase):
     )
 
     def _mock_session(self, get_html=None, post_html="", post_url="https://linux.sb/",
-                       status_code=200, cookies=None):
-        """构造 requests.Session 的 mock：GET 返回登录页 HTML，POST 返回登录结果。
+                       checkin_html=None, status_code=200, cookies=None):
+        """构造 requests.Session 的 mock：GET 按 URL 分流返回登录页或签到页，POST 返回登录结果。
 
         get_html 默认为本类的 LOGIN_PAGE（含完整反扒字段），便于登录链路提取。
         post_html / post_url / cookies 模拟登录提交后的响应与最终会话。
+        checkin_html 默认为含 _csrf 的签到页（登录后预取用），可按用例覆盖
+        以模拟登录态未生效（返回登录页）或签到页无 _csrf（页面结构变化）。
         """
         cookies = cookies or {}
         # 默认登录页用类常量；显式传入（如缺字段用例）则覆盖。捕获到局部变量，
         # 避免 _Session.get 内 self指错对象（嵌套类 self 指向 _Session 实例）
         login_html = get_html if get_html is not None else self.LOGIN_PAGE
+        # 登录后预取签到页的默认响应：登录态下渲染 _csrf 的签到页
+        checkin_html = checkin_html if checkin_html is not None else (
+            '<input type="hidden" name="_csrf" value="pagecsrf">'
+            '<div class="daily-checkin-page-panel">每日签到</div>'
+        )
 
         class _Resp:
             def __init__(self, text, url):
@@ -368,7 +375,11 @@ class AccountsLoginTestCase(unittest.TestCase):
                 self.cookies = _Cookies(cookies)
                 self.posted = None
 
-            def get(self, *a, **k):
+            def get(self, url, headers=None, timeout=None, allow_redirects=True):
+                # 登录页与签到页按 URL 分流：accounts_login 先 GET 登录页，
+                # 登录成功后预取签到页，两条 GET 响应分开。
+                if "/daily_checkin" in url:
+                    return _Resp(checkin_html, "https://linux.sb/daily_checkin")
                 return _Resp(login_html, "https://linux.sb/login")
 
             def post(self, url, headers=None, data=None, timeout=None, allow_redirects=True):
@@ -420,6 +431,28 @@ class AccountsLoginTestCase(unittest.TestCase):
         )
         with patcher:
             with self.assertRaisesRegex(RuntimeError, "未带会话 cookie"):
+                daily.accounts_login({"username": "u", "password": "p"})
+
+    def test_登录态未生效预取签到页被踢回登录页(self):
+        """登录成功但访问签到页仍返回登录页特征（含密码框）：登录态未生效"""
+        sess, patcher = self._mock_session(
+            post_html="<html>首页</html>", post_url="https://linux.sb/",
+            checkin_html='<input name="password" type="password">登录',
+            cookies={"bbs_auth": "authed"},
+        )
+        with patcher:
+            with self.assertRaisesRegex(RuntimeError, "登录态未生效"):
+                daily.accounts_login({"username": "u", "password": "p"})
+
+    def test_签到页未渲染_csrf_判定页面结构变化(self):
+        """登录态正常但签到页不含 _csrf 隐藏字段：模板改版，明确报错而非假签到"""
+        sess, patcher = self._mock_session(
+            post_html="<html>首页</html>", post_url="https://linux.sb/",
+            checkin_html="<html><div>签到页，但无 _csrf 字段</div></html>",
+            cookies={"bbs_auth": "authed"},
+        )
+        with patcher:
+            with self.assertRaisesRegex(RuntimeError, "未渲染 _csrf"):
                 daily.accounts_login({"username": "u", "password": "p"})
 
 

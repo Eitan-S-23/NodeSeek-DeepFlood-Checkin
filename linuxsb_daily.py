@@ -242,11 +242,28 @@ def accounts_login(creds):
         err = _LOGIN_ERROR_RE.search(resp.text)
         hint = f"（页面提示：{err.group(0)}）" if err else ""
         raise RuntimeError(f"账号密码登录失败，仍停留在登录页{hint}，请核对用户名/密码或稍后重试")
-    # 登录成功：把 Session 累积的全部 cookie 拼成字符串复用
+
+    # 登录成功只拿到 bbs_auth 一个会话 cookie，但签到页渲染 _csrf 隐藏字段需要
+    # bbs_csrf——该 cookie 在登录后的首次页面 GET 时由服务端 Set-Cookie 下发。
+    # 用同一 Session 预取签到页：顺手收下 bbs_csrf 补齐会话，同时确认登录态
+    # 真实能进签到页（若被踢回 /login 说明登录态未生效，明确失败而非假签到）。
+    try:
+        resp = session.get(CHECKIN_URL, headers=PAGE_HEADERS, timeout=30, allow_redirects=True)
+    except requests.RequestException as exc:
+        raise RuntimeError(f"登录后预取签到页失败：{exc}") from exc
+    if resp.status_code != 200:
+        raise RuntimeError(f"登录后预取签到页失败：HTTP {resp.status_code}")
+    checkin_final_url = getattr(resp, "url", "") or ""
+    if "/login" in checkin_final_url or 'name="password"' in resp.text:
+        raise RuntimeError("登录态未生效：登录成功后访问签到页仍被踢回登录页")
+    if not _match_first(_LOGIN_CSRF_RE, resp.text):
+        raise RuntimeError("登录后签到页未渲染 _csrf 字段，页面结构可能已变化")
+
     cookie_str = "; ".join(f"{k}={v}" for k, v in session.cookies.items())
     if not cookie_str:
         raise RuntimeError("登录响应未带会话 cookie，登录态无法建立")
-    print(f"[linux.sb] 账号密码登录成功，获取到 {len(session.cookies)} 个会话 cookie")
+    print(f"[linux.sb] 账号密码登录成功，会话就绪（{len(session.cookies)} 个 cookie："
+          f"{'/'.join(session.cookies.keys())}），签到页可正常访问")
     return cookie_str
 
 
