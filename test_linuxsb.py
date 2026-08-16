@@ -304,11 +304,15 @@ class RunLoginFallbackTestCase(unittest.TestCase):
         # 屏蔽 run() 签到的 SITE_GAP 随机延迟
         self.sleep_mock = mock.patch.object(daily.time, "sleep").start()
         self.addCleanup(mock.patch.stopall)
+        # 浏览器兜底由 LINUXSB_USE_BROWSER 显式开启（与 workflow 配置一致）。
+        # 本测试组围绕"账号密码浏览器登录"路径，统一在 setUp 打开开关，
+        # 避免每个用例重复设置；tearDown 清理环境变量时一并复位。
+        os.environ["LINUXSB_USE_BROWSER"] = "true"
 
     def tearDown(self):
         import os
 
-        for name in ("LINUXSB_COOKIE", "LINUXSB_ACCOUNT"):
+        for name in ("LINUXSB_COOKIE", "LINUXSB_ACCOUNT", "LINUXSB_USE_BROWSER"):
             os.environ.pop(name, None)
 
     def test_cookie失效时浏览器登录签到(self):

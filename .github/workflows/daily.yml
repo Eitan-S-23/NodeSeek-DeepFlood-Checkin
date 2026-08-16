@@ -86,6 +86,12 @@ jobs:
           # 账号密码兜底登录（可选）：cookie 缺失或失效时自动登录，
           # 格式为 JSON：{"username":"xx","password":"yy"}
           LINUXSB_ACCOUNT: ${{ secrets.LINUXSB_ACCOUNT }}
+          # 开启账号密码浏览器兜底登录：cookie 失效且配置了 LINUXSB_ACCOUNT 时，
+          # 用有头浏览器（配合下方 xvfb-run 虚拟显示）自动登录并就地签到。
+          # 必须显式置 true，否则 run() 默认走「引导本地更新 cookie」分支不启动浏览器。
+          # 有头模式与 NodeSeek 步骤同配比：--headless=new 与 xvfb 叠加会令元素定位卡死。
+          LINUXSB_USE_BROWSER: "true"
+          HEADLESS: "false"
           # 通知渠道与 SITE_GAP_* 在 job 级 env 已注入，notify.py 读取同一组变量
         run: |
           xvfb-run -a --server-args="-screen 0 1920x1080x24" python linuxsb_daily.py
