@@ -246,6 +246,13 @@ def browser_sign_in(creds):
         # 选择器会匹配到搜索按钮——曾因此点击了搜索而非登录，跳到空搜索页
         # （index.php?field=title&q=）且被误判为登录成功
         login_form = password_input.find_element(By.XPATH, "ancestor::form[1]")
+        # 登录前记住登录表单的 _csrf：登录成功后服务端会删除 bbs_csrf cookie，
+        # 签到页也不再渲染 _csrf 隐藏字段——而签到 POST 校验的正是本会话的 CSRF
+        # 令牌（与 Cookie 路径一致：sign_in_account 用 bbs_csrf cookie 值即本会话
+        # CSRF）。所以这里把登录时的 _csrf 存下来，留给签到 fetch 复用。
+        login_csrf = login_form.find_element(By.NAME, "_csrf").get_attribute("value")
+        if not login_csrf:
+            raise RuntimeError("登录表单未取到 _csrf，无法为签到准备 CSRF 令牌")
         submit = login_form.find_element(By.CSS_SELECTOR, "button[type=submit], button")
         submit.click()
         # 登录成功的可靠特征：登录表单（password 输入框）从页面消失。
@@ -273,15 +280,14 @@ def browser_sign_in(creds):
         else:
             stage = "执行签到请求（页面内 fetch）"
             driver.set_script_timeout(20)
+            # 签到 CSRF 用登录时记住的 login_csrf（本会话令牌）。登录成功后
+            # bbs_csrf cookie 被服务端设成 deleted、签到页也不再渲染 _csrf 字段，
+            # 那两个来源都拿不到有效令牌。cookie 由浏览器会话自动随 fetch 携带，
+            # 服务端按「提交的 _csrf + 携带的 bbs_auth cookie」校验登录态。
+            csrf_to_submit = login_csrf
             result = driver.execute_async_script(
                 "const done = arguments[arguments.length - 1];"
-                "/* csrf 优先取页面隐藏字段，登录后签到页可能不渲染该字段，"
-                "   退回到 cookie 中的 bbs_csrf（与 requests 路径同一兜底策略） */"
-                "let csrf = (document.querySelector('input[name=\"_csrf\"]') || {}).value || '';"
-                "if (!csrf) {"
-                "  const m = document.cookie.match(/(?:^|;\\s*)bbs_csrf=([^;]+)/);"
-                "  csrf = m ? decodeURIComponent(m[1]) : '';"
-                "}"
+                "const csrf = arguments[0];"
                 "fetch('/daily_checkin', {"
                 "  method: 'POST',"
                 "  headers: {"
@@ -289,7 +295,8 @@ def browser_sign_in(creds):
                 "    'X-Requested-With': 'XMLHttpRequest'"
                 "  },"
                 "  body: '_csrf=' + encodeURIComponent(csrf)"
-                "}).then(r => r.json()).then(done).catch(e => done({ok: 0, message: String(e)}));"
+                "}).then(r => r.json()).then(done).catch(e => done({ok: 0, message: String(e)}));",
+                csrf_to_submit,
             )
             message = result.get("message", "") or ""
             if result.get("ok") in (1, True, "1", "true"):
