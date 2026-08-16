@@ -273,8 +273,12 @@ def browser_sign_in(creds):
         # 以同一浏览器会话访问签到页并执行签到
         stage = "访问签到页"
         driver.get(CHECKIN_URL)
-        stage = "等待签到页 _csrf"
-        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'input[name="_csrf"]')))
+        # 签到页加载完成的稳定标志：摘要面板 .daily-checkin-page-panel 或用户卡
+        # .user-card（登录态必居其一）。原先等 input[name="_csrf"] 会因登录后
+        # 签到页不含该字段而超时——_csrf 只在登录页/未登录态渲染。
+        stage = "等待签到页加载"
+        wait.until(lambda d: d.find_elements(By.CSS_SELECTOR,
+                    ".daily-checkin-page-panel, .user-card"))
         # 保险：签到页仍重定向到登录页说明登录态未生效，明确失败而不匿名假签到
         if "/login" in driver.current_url:
             raise RuntimeError("登录态未生效：签到页仍重定向到登录页")
@@ -287,7 +291,13 @@ def browser_sign_in(creds):
             driver.set_script_timeout(20)
             result = driver.execute_async_script(
                 "const done = arguments[arguments.length - 1];"
-                "const csrf = document.querySelector('input[name=\"_csrf\"]').value;"
+                "/* csrf 优先取页面隐藏字段，登录后签到页可能不渲染该字段，"
+                "   退回到 cookie 中的 bbs_csrf（与 requests 路径同一兜底策略） */"
+                "let csrf = (document.querySelector('input[name=\"_csrf\"]') || {}).value || '';"
+                "if (!csrf) {"
+                "  const m = document.cookie.match(/(?:^|;\\s*)bbs_csrf=([^;]+)/);"
+                "  csrf = m ? decodeURIComponent(m[1]) : '';"
+                "}"
                 "fetch('/daily_checkin', {"
                 "  method: 'POST',"
                 "  headers: {"
@@ -309,7 +319,11 @@ def browser_sign_in(creds):
         # 刷新签到页提取用户名/积分/连续签到概览
         stage = "刷新签到页提取概览"
         driver.refresh()
-        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'input[name="_csrf"]')))
+        # 登录后的签到页 DOM 不含 input[name="_csrf"]（该隐藏字段只在登录页/未登录态
+        # 出现），原先用 _csrf 等待会 30 秒超时并失败。改等签到页稳定标志：摘要面板
+        # .daily-checkin-page-panel 或用户卡 .user-card，二者登录态必居其一。
+        wait.until(lambda d: d.find_elements(By.CSS_SELECTOR,
+                    ".daily-checkin-page-panel, .user-card"))
         print(f"[linux.sb] 签到页：URL {driver.current_url}，标题「{driver.title}」")
         html = driver.page_source
         meta = extract_checkin_meta(html)
