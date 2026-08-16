@@ -297,175 +297,6 @@ class AccountLoginTestCase(unittest.TestCase):
             daily.solve_captcha_question("请输入验证码")
 
 
-class NativeCaptchaPowTestCase(unittest.TestCase):
-    """登录页 PoW 求解测试（与站点 plugins.js nativeCaptchaSolve 同算法）"""
-
-    def test_pow前导零匹配(self):
-        # prefix=0638ea1959f38c05 zeros=3，对照 .cache_login.html 真实题面
-        nonce = daily.solve_native_captcha_pow("0638ea1959f38c05", 3)
-        import hashlib
-        digest = hashlib.sha256(("0638ea1959f38c05:" + nonce).encode()).hexdigest()
-        self.assertTrue(digest.startswith("000"), f"nonce={nonce} digest={digest}")
-
-    def test_zeros约束前导零位数(self):
-        nonce = daily.solve_native_captcha_pow("abc", 2)
-        import hashlib
-        digest = hashlib.sha256(("abc:" + nonce).encode()).hexdigest()
-        self.assertTrue(digest.startswith("00"))
-        # zeros=2 不强制第三位为零
-        self.assertNotEqual(digest[2], "0")
-
-    def test_nonce为十六进制字符串(self):
-        nonce = daily.solve_native_captcha_pow("p", 2)
-        self.assertIsInstance(nonce, str)
-        int(nonce, 16)  # 合法十六进制
-
-
-class AccountsLoginTestCase(unittest.TestCase):
-    """纯 requests 账号密码登录链路测试（mock 网络与字段提取）"""
-
-    LOGIN_PAGE = (
-        '<form method="post"><input type="hidden" name="_csrf" value="csrfABC">'
-        '<input name="username"><input name="password" type="password">'
-        '<div class="user-review-native-captcha" data-native-captcha '
-        'data-pow-prefix="0638ea1959f38c05" data-pow-zeroes="3">'
-        '<div class="native-captcha-question">11 - 4 = ?</div>'
-        '<input name="native_captcha_answer">'
-        '<input type="hidden" name="native_captcha_token" value="tok.eyJ2IjoxfQ">'
-        '<input type="hidden" name="native_captcha_pow" value="">'
-        '<input type="text" name="native_captcha_company">'
-        '</div><button>登录</button></form>'
-    )
-
-    def _mock_session(self, get_html=None, post_html="", post_url="https://linux.sb/",
-                       checkin_html=None, status_code=200, cookies=None):
-        """构造 requests.Session 的 mock：GET 按 URL 分流返回登录页或签到页，POST 返回登录结果。
-
-        get_html 默认为本类的 LOGIN_PAGE（含完整反扒字段），便于登录链路提取。
-        post_html / post_url / cookies 模拟登录提交后的响应与最终会话。
-        checkin_html 默认为含 _csrf 的签到页（登录后预取用），可按用例覆盖
-        以模拟登录态未生效（返回登录页）或签到页无 _csrf（页面结构变化）。
-        """
-        cookies = cookies or {}
-        # 默认登录页用类常量；显式传入（如缺字段用例）则覆盖。捕获到局部变量，
-        # 避免 _Session.get 内 self指错对象（嵌套类 self 指向 _Session 实例）
-        login_html = get_html if get_html is not None else self.LOGIN_PAGE
-        # 登录后预取签到页的默认响应：登录态下渲染 _csrf 的签到页
-        checkin_html = checkin_html if checkin_html is not None else (
-            '<input type="hidden" name="_csrf" value="pagecsrf">'
-            '<div class="daily-checkin-page-panel">每日签到</div>'
-        )
-
-        class _Resp:
-            def __init__(self, text, url):
-                self.status_code = status_code
-                self.text = text
-                self.url = url
-                self.cookies = cookies
-
-        class _Cookies(dict):
-            """模拟 requests.Session.cookies（dict-like，带 items()）"""
-
-            def items(self):
-                return dict.items(self)
-
-        class _Session:
-            def __init__(self):
-                self.headers = {}
-                self.cookies = _Cookies(cookies)
-                self.posted = None
-
-            def get(self, url, headers=None, timeout=None, allow_redirects=True):
-                # 登录页与签到页按 URL 分流：accounts_login 先 GET 登录页，
-                # 登录成功后预取签到页，两条 GET 响应分开。
-                if "/daily_checkin" in url:
-                    return _Resp(checkin_html, "https://linux.sb/daily_checkin")
-                return _Resp(login_html, "https://linux.sb/login")
-
-            def post(self, url, headers=None, data=None, files=None, timeout=None, allow_redirects=True):
-                # multipart 提交时字段在 files（值形如 {key: (None, value)}），
-                # urlencoded 提交时在 data。统一还原成 {key: value} 便于断言。
-                if files:
-                    posted_form = {key: (val[1] if isinstance(val, tuple) else val)
-                                   for key, val in files.items()}
-                else:
-                    posted_form = data or {}
-                self.posted = (url, posted_form, files is not None)
-                return _Resp(post_html, post_url)
-
-        sess = _Session()
-        patcher = mock.patch.object(daily.requests, "Session", return_value=sess)
-        return sess, patcher
-
-    def test_登录成功返回会话cookie(self):
-        sess, patcher = self._mock_session(
-            post_html="<html>首页</html>", post_url="https://linux.sb/",
-            cookies={"bbs_auth": "authed", "bbs_csrf": "csrf123"},
-        )
-        with patcher:
-            cookie = daily.accounts_login({"username": "u", "password": "p"})
-        self.assertIn("bbs_auth=authed", cookie)
-        self.assertIn("bbs_csrf=csrf123", cookie)
-        # POST 提交了完整表单，含本地解出的算术题答案与 PoW nonce、蜜罐留空
-        url, data, is_multipart = sess.posted
-        # 真实浏览器用 FormData 提交 multipart/form-data，登录必须用 multipart
-        self.assertTrue(is_multipart, "登录 POST 必须用 multipart/form-data（对齐真实浏览器 FormData）")
-        self.assertEqual(data["username"], "u")
-        self.assertEqual(data["password"], "p")
-        self.assertEqual(data["native_captcha_answer"], "7")  # 11-4
-        self.assertEqual(data["native_captcha_company"], "")
-        self.assertEqual(data["native_captcha_token"], "tok.eyJ2IjoxfQ")
-        # PoW nonce 解出的摘要前 3 位为零
-        import hashlib
-        digest = hashlib.sha256(("0638ea1959f38c05:" + data["native_captcha_pow"]).encode()).hexdigest()
-        self.assertTrue(digest.startswith("000"))
-
-    def test_留在登录页判定失败(self):
-        sess, patcher = self._mock_session(
-            post_html="<html>登录失败</html>", post_url="https://linux.sb/login", cookies={},
-        )
-        with patcher:
-            with self.assertRaisesRegex(RuntimeError, "未下发 bbs_auth"):
-                daily.accounts_login({"username": "u", "password": "p"})
-
-    def test_登录页缺字段抛异常(self):
-        sess, patcher = self._mock_session(get_html="<html>无登录表单</html>")
-        with patcher:
-            with self.assertRaisesRegex(RuntimeError, "结构变化"):
-                daily.accounts_login({"username": "u", "password": "p"})
-
-    def test_登录后无cookie抛异常(self):
-        """POST /login 不带任何会话 cookie 回写（cookies={}）：登录未建立，明确失败"""
-        sess, patcher = self._mock_session(
-            post_html="<html>首页</html>", post_url="https://linux.sb/", cookies={},
-        )
-        with patcher:
-            with self.assertRaisesRegex(RuntimeError, "未下发 bbs_auth"):
-                daily.accounts_login({"username": "u", "password": "p"})
-
-    def test_登录态未生效预取签到页被踢回登录页(self):
-        """登录成功但访问签到页仍返回登录页特征（含密码框）：登录态未生效"""
-        sess, patcher = self._mock_session(
-            post_html="<html>首页</html>", post_url="https://linux.sb/",
-            checkin_html='<input name="password" type="password">登录',
-            cookies={"bbs_auth": "authed"},
-        )
-        with patcher:
-            with self.assertRaisesRegex(RuntimeError, "登录态未生效"):
-                daily.accounts_login({"username": "u", "password": "p"})
-
-    def test_签到页未渲染_csrf_判定页面结构变化(self):
-        """登录态正常但签到页不含 _csrf 隐藏字段：模板改版，明确报错而非假签到"""
-        sess, patcher = self._mock_session(
-            post_html="<html>首页</html>", post_url="https://linux.sb/",
-            checkin_html="<html><div>签到页，但无 _csrf 字段</div></html>",
-            cookies={"bbs_auth": "authed"},
-        )
-        with patcher:
-            with self.assertRaisesRegex(RuntimeError, "未渲染 _csrf"):
-                daily.accounts_login({"username": "u", "password": "p"})
-
-
 class RunLoginFallbackTestCase(unittest.TestCase):
     """run() 内 cookie 失效降级登录流程测试（账号密码登录后就地签到）"""
 
@@ -480,79 +311,64 @@ class RunLoginFallbackTestCase(unittest.TestCase):
         for name in ("LINUXSB_COOKIE", "LINUXSB_ACCOUNT"):
             os.environ.pop(name, None)
 
-    def test_cookie失效时账号密码登录签到(self):
+    def test_cookie失效时浏览器登录签到(self):
         os.environ["LINUXSB_COOKIE"] = "a=1"
         os.environ["LINUXSB_ACCOUNT"] = '{"username": "u", "password": "p"}'
-        # 账号密码登录走 accounts_login（纯 requests），登录成功返回会话 cookie 后
-        # 进入 sign_in_account 完成签到。两条路径都 mock：accounts_login 返回伪造
-        # 会话 cookie，requests.get/post 由 fake_get/fake_post 接管签到页与签到 POST。
-        # run() 的 cookie 探测先 GET 签到页（此处按 cookie 名 a=1 返回登录页特征
-        # 「请登录」使 cookie_valid=False），accounts_login 返回伪造会话 cookie 后
-        # sign_in_account 的概览 GET 再返回未签到签到页，两条 GET 路径分开。
-        fake_session_cookie = "bbs_auth=authed; bbs_csrf=sessioncsrf"
-
-        def get_handler(url, headers=None, cookies=None, timeout=None):
-            # cookie 探测（带 a=1）判失效；登录后的概览 GET（带 bbs_auth）返回签到页
-            if cookies and cookies.get("a") == "1":
-                return FakeResponse(text="<html>请登录</html>")
-            return FakeResponse(text=PAGE_UNCHECKED)
-
-        with mock.patch.object(daily.requests, "get", side_effect=get_handler), \
-             fake_post({"ok": 1, "message": "签到成功"}), \
-             mock.patch.object(daily, "accounts_login",
-                               return_value=fake_session_cookie) as login_mock, \
+        # 账号密码登录走 browser_sign_in_with_retry（浏览器，曾完整成功过一次），
+        # 登录成功在浏览器会话内就地签到，不经过 requests 导出 cookie。
+        # run() 的 cookie 探测用 requests.get 返回登录页特征判失效，触发浏览器兜底。
+        with fake_get("<html>请登录</html>"), \
+             mock.patch.object(daily, "browser_sign_in_with_retry",
+                               return_value=(True, "签到结果: 签到成功（浏览器）", "小明")) as sign_mock, \
              mock.patch.object(daily.notify, "send") as send_mock:
             code = daily.run()
 
         self.assertEqual(code, 0)
-        login_mock.assert_called_once()
-        self.assertEqual(login_mock.call_args.args[0],
+        sign_mock.assert_called_once()
+        self.assertEqual(sign_mock.call_args.args[0],
                          {"username": "u", "password": "p"})
         content = send_mock.call_args.args[1]
-        self.assertIn("签到成功", content)
-        # 账号密码登录返回的会话 cookie 用于签到 POST，不应泄露进通知
-        self.assertNotIn("bbs_auth", content)
+        self.assertIn("浏览器", content)
+        self.assertIn("小明", content)
 
-    def test_仅配置账号密码时登录签到(self):
+    def test_仅配置账号密码时浏览器登录签到(self):
         os.environ["LINUXSB_ACCOUNT"] = '{"username": "u", "password": "p"}'
-        fake_session_cookie = "bbs_auth=authed"
-        with fake_get(PAGE_UNCHECKED), fake_post({"ok": 1, "message": "好"}), \
-             mock.patch.object(daily, "accounts_login",
-                               return_value=fake_session_cookie) as login_mock, \
+        with mock.patch.object(daily, "browser_sign_in_with_retry",
+                               return_value=(True, "签到结果: 签到成功", None)) as sign_mock, \
              mock.patch.object(daily.notify, "send") as send_mock:
             code = daily.run()
         self.assertEqual(code, 0)
-        login_mock.assert_called_once()
+        sign_mock.assert_called_once()
         self.assertIn("签到成功", send_mock.call_args.args[1])
 
     def test_cookie失效且无凭据时明确报错(self):
         os.environ["LINUXSB_COOKIE"] = "a=1"
         with fake_get("<html>请登录</html>"), \
-             mock.patch.object(daily, "accounts_login") as login_mock, \
+             mock.patch.object(daily, "browser_sign_in_with_retry") as sign_mock, \
              mock.patch.object(daily.notify, "send") as send_mock:
             code = daily.run()
         self.assertEqual(code, 1)
-        login_mock.assert_not_called()
+        sign_mock.assert_not_called()
         self.assertIn("Cookie 已失效", send_mock.call_args.args[1])
 
-    def test_cookie有效时走requests签到不启动登录(self):
+    def test_cookie有效时走requests签到不启动浏览器(self):
         os.environ["LINUXSB_COOKIE"] = "a=1"
         os.environ["LINUXSB_ACCOUNT"] = '{"username": "u", "password": "p"}'
         with fake_get(PAGE_UNCHECKED), fake_post({"ok": 1, "message": "好"}), \
-             mock.patch.object(daily, "accounts_login") as login_mock, \
+             mock.patch.object(daily, "browser_sign_in_with_retry") as sign_mock, \
              mock.patch.object(daily.notify, "send") as send_mock:
             code = daily.run()
         self.assertEqual(code, 0)
-        login_mock.assert_not_called()
+        sign_mock.assert_not_called()
         self.assertIn("签到成功", send_mock.call_args.args[1])
 
     def test_无cookie无凭据时静默跳过(self):
         with mock.patch.object(daily.notify, "send") as send_mock, \
-             mock.patch.object(daily, "accounts_login") as login_mock:
+             mock.patch.object(daily, "browser_sign_in_with_retry") as sign_mock:
             code = daily.run()
         self.assertEqual(code, 0)
         send_mock.assert_not_called()
-        login_mock.assert_not_called()
+        sign_mock.assert_not_called()
 
 
 class RunTestCase(unittest.TestCase):
