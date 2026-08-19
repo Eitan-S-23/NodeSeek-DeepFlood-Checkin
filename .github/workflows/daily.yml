@@ -6,6 +6,11 @@ on:
       - main
   # 支持在 Actions 页面手动触发，便于验证配置是否生效
   workflow_dispatch:
+    inputs:
+      linuxsb_force_browser:
+        description: 'linux.sb 跳过 requests 探测直接走浏览器通道（验证兜底通道用）'
+        type: boolean
+        default: false
   schedule:
     - cron: '00 0 * * *'  # UTC 00:00，即北京时间 08:00
 
@@ -91,6 +96,9 @@ jobs:
           LINUXSB_ACCOUNT: ${{ secrets.LINUXSB_ACCOUNT }}
           # 有头模式 + xvfb 虚拟显示（与 NodeSeek 步骤同配比），浏览器登录更稳定
           HEADLESS: "false"
+          # 手动触发时可勾选，跳过 requests 探测直接验证浏览器通道；
+          # 定时与 push 触发下 inputs 为空，保持 requests 快通道优先
+          LINUXSB_FORCE_BROWSER: ${{ inputs.linuxsb_force_browser && '1' || '' }}
           # 通知渠道与 SITE_GAP_* 在 job 级 env 已注入，notify.py 读取同一组变量
         run: |
           xvfb-run -a --server-args="-screen 0 1920x1080x24" python linuxsb_daily.py
