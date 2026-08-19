@@ -76,9 +76,9 @@ jobs:
         run: |
           xvfb-run -a --server-args="-screen 0 1920x1080x24" python nodeseek_daily.py
 
-      # linux.sb（烧饼社区）无 Cloudflare 防护，签到本身用纯 requests；仅当
-      # LINUXSB_COOKIE 失效需要账号密码兜底登录时才启动浏览器（登录验证码的
-      # answer 哈希算法在服务端且 bbs1 后端未开源，纯 requests 无法复刻）。
+      # linux.sb（烧饼社区）2026-08 起启用 Cloudflare 托管挑战：非浏览器客户端一律
+      # 403 + Cf-Mitigated: challenge（本地住宅 IP、补全浏览器请求头、curl_cffi 各
+      # impersonate 目标均实测被拦），故脚本被挑战时自动改用浏览器过盾再签到。
       # 用 xvfb-run 提供虚拟显示，配合 HEADLESS=false 走有头浏览器，与 NodeSeek
       # 步骤同一配比（--headless=new 与 xvfb 叠加会令元素定位卡死）。
       - name: Run LinuxSB script

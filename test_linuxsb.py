@@ -25,16 +25,25 @@ PAGE_CHECKED = (
     '<span>今日已签到</span>'
     '</body></html>'
 )
+# 模拟 Cloudflare 托管挑战页（站点 2026-08 起对非浏览器客户端全站返回此页）
+CF_CHALLENGE_PAGE = (
+    '<!DOCTYPE html><html><head><title>Just a moment...</title>'
+    '<meta http-equiv="Content-Security-Policy" '
+    'content="script-src https://challenges.cloudflare.com">'
+    '</head><body><div id="cf-wrapper"></div></body></html>'
+)
 
 
 class FakeResponse:
     """模拟 requests.Response"""
 
-    def __init__(self, status_code=200, text="", json_data=None, url=None):
+    def __init__(self, status_code=200, text="", json_data=None, url=None, headers=None):
         self.status_code = status_code
         self.text = text
         self._json_data = json_data
         self.url = url
+        # 真实响应总有 headers；默认给空字典，Cloudflare 用例再传 cf-* 头
+        self.headers = headers or {}
 
     def json(self):
         return self._json_data
@@ -45,6 +54,20 @@ def fake_get(page_html, status_code=200):
 
     def handler(url, headers=None, cookies=None, timeout=None):
         return FakeResponse(status_code=status_code, text=page_html)
+
+    return mock.patch.object(daily.requests, "get", side_effect=handler)
+
+
+def fake_get_cf():
+    """构造被 Cloudflare 托管挑战拦截的 GET 响应 mock（HTTP 403 + 挑战页）"""
+
+    def handler(url, headers=None, cookies=None, timeout=None):
+        return FakeResponse(
+            status_code=403,
+            text=CF_CHALLENGE_PAGE,
+            headers={"Cf-Mitigated": "challenge", "Cf-Ray": "abc123-SJC",
+                     "Server": "cloudflare"},
+        )
 
     return mock.patch.object(daily.requests, "get", side_effect=handler)
 
@@ -400,6 +423,404 @@ class RunLoginFallbackTestCase(unittest.TestCase):
         self.assertEqual(code, 0)
         send_mock.assert_not_called()
         sign_mock.assert_not_called()
+
+
+class CloudflareDetectTestCase(unittest.TestCase):
+    """Cloudflare 挑战识别与 cookie 注入过滤测试"""
+
+    def test_响应头cf_mitigated判定为挑战(self):
+        resp = FakeResponse(status_code=403, text="",
+                            headers={"Cf-Mitigated": "challenge"})
+        self.assertTrue(daily.is_cf_challenge_response(resp))
+
+    def test_响应头大小写不敏感(self):
+        resp = FakeResponse(status_code=403, text="",
+                            headers={"cf-mitigated": "CHALLENGE"})
+        self.assertTrue(daily.is_cf_challenge_response(resp))
+
+    def test_挑战页正文特征判定为挑战(self):
+        """没有 cf-mitigated 头时，靠 Just a moment 标题等正文特征识别"""
+        resp = FakeResponse(status_code=403, text=CF_CHALLENGE_PAGE)
+        self.assertTrue(daily.is_cf_challenge_response(resp))
+
+    def test_普通错误页不误判为挑战(self):
+        resp = FakeResponse(status_code=500, text="<html>Internal Error</html>")
+        self.assertFalse(daily.is_cf_challenge_response(resp))
+
+    def test_无headers属性的响应也能判定(self):
+        """兼容不带 headers 的响应对象，只看正文特征，不应抛 AttributeError"""
+
+        class Bare:
+            status_code = 403
+            text = CF_CHALLENGE_PAGE
+
+        self.assertTrue(daily.is_cf_challenge_response(Bare()))
+
+    def test_跳过与IP和UA绑定的cookie(self):
+        for name in ("cf_clearance", "__cf_bm", "_ga", "_ga_ABC123", "_gid",
+                     "CF_CLEARANCE"):
+            self.assertTrue(daily.should_skip_cookie(name), name)
+
+    def test_登录态cookie不跳过(self):
+        for name in ("bbs_auth", "bbs_csrf", "__daily_checkin_stats"):
+            self.assertFalse(daily.should_skip_cookie(name), name)
+
+
+class FetchCheckinStateCloudflareTestCase(unittest.TestCase):
+    """requests 通道被 Cloudflare 挑战时的异常分型测试"""
+
+    def test_挑战拦截抛CloudflareChallenged(self):
+        """403 + Cf-Mitigated: challenge 必须抛专用异常，供 run() 切浏览器通道"""
+        with fake_get_cf():
+            with self.assertRaises(daily.CloudflareChallenged) as ctx:
+                daily.fetch_checkin_state("bbs_auth=abc")
+        # 异常信息带 cf-mitigated / cf-ray，便于从 Actions 日志直接确认是挑战
+        self.assertIn("Cloudflare", str(ctx.exception))
+        self.assertIn("challenge", str(ctx.exception))
+        self.assertIn("abc123-SJC", str(ctx.exception))
+
+    def test_普通403不抛CloudflareChallenged(self):
+        """非挑战的 403（如 IP 封禁）仍按普通失败处理，不该白启动浏览器"""
+        with fake_get("<html>Forbidden</html>", status_code=403):
+            with self.assertRaises(RuntimeError) as ctx:
+                daily.fetch_checkin_state("bbs_auth=abc")
+        self.assertNotIsInstance(ctx.exception, daily.CloudflareChallenged)
+        self.assertIn("HTTP 403", str(ctx.exception))
+
+
+class BrowserRetryTestCase(unittest.TestCase):
+    """浏览器动作重试策略测试"""
+
+    def setUp(self):
+        # 屏蔽重试间隔的 sleep，避免单测真实等待
+        mock.patch.object(daily.time, "sleep").start()
+        self.addCleanup(mock.patch.stopall)
+
+    def test_首次成功不重试(self):
+        calls = []
+
+        def func(arg):
+            calls.append(arg)
+            return True, "ok", None
+
+        self.assertEqual(daily._browser_with_retry("测试", func, "x"),
+                         (True, "ok", None))
+        self.assertEqual(calls, ["x"])
+
+    def test_偶发失败后重试成功(self):
+        calls = []
+
+        def func(arg):
+            calls.append(arg)
+            if len(calls) == 1:
+                raise RuntimeError("导航卡死")
+            return True, "ok", None
+
+        self.assertEqual(daily._browser_with_retry("测试", func, "x"),
+                         (True, "ok", None))
+        self.assertEqual(len(calls), 2)
+
+    def test_cookie失效不重试直接上抛(self):
+        """Cookie 失效重开浏览器也不会变有效，必须立刻上抛给凭据兜底"""
+        calls = []
+
+        def func(arg):
+            calls.append(arg)
+            raise daily.CookieExpired("登录态未生效")
+
+        with self.assertRaises(daily.CookieExpired):
+            daily._browser_with_retry("测试", func, "x")
+        self.assertEqual(len(calls), 1)
+
+    def test_连续失败抛出汇总异常(self):
+        def func(arg):
+            raise RuntimeError("导航卡死")
+
+        with self.assertRaisesRegex(RuntimeError, "连续 2 次失败"):
+            daily._browser_with_retry("测试", func, "x", max_attempts=2)
+
+
+class RunCloudflareFallbackTestCase(unittest.TestCase):
+    """run() 在 Cloudflare 挑战下改走浏览器通道的流程测试"""
+
+    def setUp(self):
+        # 屏蔽 run() 签到前的 SITE_GAP 随机延迟
+        mock.patch.object(daily.time, "sleep").start()
+        self.addCleanup(mock.patch.stopall)
+
+    def tearDown(self):
+        for name in ("LINUXSB_COOKIE", "LINUXSB_ACCOUNT"):
+            os.environ.pop(name, None)
+
+    def test_挑战时改用浏览器注入cookie签到(self):
+        os.environ["LINUXSB_COOKIE"] = "bbs_auth=abc; bbs_csrf=csrf1"
+        with fake_get_cf(), \
+             mock.patch.object(daily.requests, "post") as post_mock, \
+             mock.patch.object(daily, "browser_cookie_sign_in_with_retry",
+                               return_value=(True, "签到结果: 签到成功（浏览器）",
+                                             "小明")) as cookie_mock, \
+             mock.patch.object(daily, "browser_sign_in_with_retry") as login_mock, \
+             mock.patch.object(daily.notify, "send") as send_mock:
+            code = daily.run()
+
+        self.assertEqual(code, 0)
+        # 走浏览器 Cookie 通道，且原样传入该账号的 cookie
+        cookie_mock.assert_called_once_with("bbs_auth=abc; bbs_csrf=csrf1")
+        # 挑战下 requests 通道整条不可用，绝不能再发签到 POST
+        post_mock.assert_not_called()
+        # 未配置凭据也不该触碰账号密码通道
+        login_mock.assert_not_called()
+        self.assertIn("小明", send_mock.call_args.args[1])
+
+    def test_挑战且cookie失效时回落账号密码登录(self):
+        os.environ["LINUXSB_COOKIE"] = "bbs_auth=expired"
+        os.environ["LINUXSB_ACCOUNT"] = '{"username": "u", "password": "p"}'
+        with fake_get_cf(), \
+             mock.patch.object(daily, "browser_cookie_sign_in_with_retry",
+                               side_effect=daily.CookieExpired("登录态未生效")), \
+             mock.patch.object(daily, "browser_sign_in_with_retry",
+                               return_value=(True, "签到结果: 签到成功", "小明")
+                               ) as login_mock, \
+             mock.patch.object(daily.notify, "send") as send_mock:
+            code = daily.run()
+
+        self.assertEqual(code, 0)
+        login_mock.assert_called_once()
+        self.assertEqual(login_mock.call_args.args[0],
+                         {"username": "u", "password": "p"})
+        self.assertIn("签到成功", send_mock.call_args.args[1])
+
+    def test_挑战且cookie失效且无凭据时明确报错(self):
+        os.environ["LINUXSB_COOKIE"] = "bbs_auth=expired"
+        with fake_get_cf(), \
+             mock.patch.object(daily, "browser_cookie_sign_in_with_retry",
+                               side_effect=daily.CookieExpired("登录态未生效")), \
+             mock.patch.object(daily.notify, "send") as send_mock:
+            code = daily.run()
+
+        self.assertEqual(code, 1)
+        content = send_mock.call_args.args[1]
+        self.assertIn("Cookie 已失效", content)
+        self.assertIn("更新 LINUXSB_COOKIE", content)
+
+    def test_挑战下浏览器通道失败时如实报告(self):
+        """浏览器也过不去时按失败处理，退出码 1，摘要保留原因"""
+        os.environ["LINUXSB_COOKIE"] = "bbs_auth=abc"
+        with fake_get_cf(), \
+             mock.patch.object(daily, "browser_cookie_sign_in_with_retry",
+                               side_effect=RuntimeError("浏览器 Cookie 签到连续 2 次失败")), \
+             mock.patch.object(daily.notify, "send") as send_mock:
+            code = daily.run()
+
+        self.assertEqual(code, 1)
+        self.assertIn("连续 2 次失败", send_mock.call_args.args[1])
+
+    def test_探测通过后中途开盾也走浏览器(self):
+        """站点在探测之后才开挑战：requests 签到抛挑战异常，同样转浏览器通道"""
+        os.environ["LINUXSB_COOKIE"] = "bbs_auth=abc"
+        calls = []
+
+        def get_handler(url, headers=None, cookies=None, timeout=None):
+            calls.append(url)
+            if len(calls) == 1:  # 第一次探测正常放行
+                return FakeResponse(text=PAGE_UNCHECKED)
+            return FakeResponse(status_code=403, text=CF_CHALLENGE_PAGE,
+                                headers={"Cf-Mitigated": "challenge"})
+
+        with mock.patch.object(daily.requests, "get", side_effect=get_handler), \
+             mock.patch.object(daily.requests, "post") as post_mock, \
+             mock.patch.object(daily, "browser_cookie_sign_in_with_retry",
+                               return_value=(True, "签到结果: 签到成功（浏览器）", None)
+                               ) as cookie_mock, \
+             mock.patch.object(daily.notify, "send") as send_mock:
+            code = daily.run()
+
+        self.assertEqual(code, 0)
+        cookie_mock.assert_called_once()
+        post_mock.assert_not_called()
+        self.assertIn("浏览器", send_mock.call_args.args[1])
+
+    def test_多账号中一个被挑战不影响其余账号(self):
+        """挑战是全站规则，但通道判定按账号独立，单账号浏览器失败不拖垮其他账号"""
+        os.environ["LINUXSB_COOKIE"] = "bbs_auth=a&bbs_auth=b"
+
+        def get_handler(url, headers=None, cookies=None, timeout=None):
+            # 账号 a 被挑战（走浏览器），账号 b 正常（走 requests）
+            if cookies and cookies.get("bbs_auth") == "a":
+                return FakeResponse(status_code=403, text=CF_CHALLENGE_PAGE,
+                                    headers={"Cf-Mitigated": "challenge"})
+            return FakeResponse(text=PAGE_UNCHECKED)
+
+        with mock.patch.object(daily.requests, "get", side_effect=get_handler), \
+             fake_post({"ok": 1, "message": "签到成功"}) as post_mock, \
+             mock.patch.object(daily, "browser_cookie_sign_in_with_retry",
+                               side_effect=RuntimeError("浏览器起不来")), \
+             mock.patch.object(daily.notify, "send") as send_mock:
+            code = daily.run()
+
+        self.assertEqual(code, 1)
+        # 账号 b 正常完成 requests 签到
+        self.assertEqual(post_mock.call_count, 1)
+        content = send_mock.call_args.args[1]
+        self.assertIn("账号 1", content)
+        self.assertIn("账号 2", content)
+        self.assertIn("浏览器起不来", content)
+
+
+class FakeDriver:
+    """
+    模拟 selenium WebDriver 的最小子集，用于在不启动真实浏览器的前提下测试
+    浏览器通道的判断逻辑（重定向识别、CSRF 取值、签到响应分类）。
+
+    pages: {URL 关键字: HTML}，按 get/refresh 的目标切换 page_source；
+    landing: get 之后实际停留的 URL（模拟 302 到 /login）。
+    """
+
+    def __init__(self, page, cookies=None, script_result=None, landing=None,
+                 title="每日签到 - 烧饼社区"):
+        self.page = page
+        self._cookies = cookies or []
+        self.script_result = script_result
+        self.landing = landing
+        self.title = title
+        self.current_url = ""
+        self.dom_queries = []      # wait_dom_ready 的调用记录
+        self.async_scripts = []    # 签到 fetch 的调用记录
+        self.refreshed = 0
+
+    def get(self, url):
+        self.current_url = self.landing or url
+
+    def refresh(self):
+        self.refreshed += 1
+
+    @property
+    def page_source(self):
+        return self.page
+
+    def set_script_timeout(self, seconds):
+        pass
+
+    def get_cookies(self):
+        return self._cookies
+
+    def execute_script(self, script, *args):
+        # 只服务 wait_dom_ready 的 querySelector 探测：按类名是否出现在 HTML 判定
+        selector = args[0] if args else ""
+        self.dom_queries.append(selector)
+        return any(cls.strip().lstrip(".") in self.page
+                   for cls in selector.split(","))
+
+    def execute_async_script(self, script, *args):
+        self.async_scripts.append(args)
+        return self.script_result
+
+
+# 登录态签到页（含站点真实类名 daily-checkin-wrap，未签到）
+BROWSER_PAGE_UNCHECKED = (
+    '<html><head><title>每日签到</title></head><body>'
+    '<div class="daily-checkin-wrap"><button>每日签到</button></div>'
+    '<a class="user-name" href="/user/42">烧饼爱好者</a>'
+    '<div>当前积分：888</div></body></html>'
+)
+# 登录态签到页（已签到）
+BROWSER_PAGE_CHECKED = BROWSER_PAGE_UNCHECKED.replace(
+    '<button>每日签到</button>', '<span>今日已签到</span>'
+)
+
+
+class CheckinInBrowserTestCase(unittest.TestCase):
+    """浏览器通道内签到逻辑测试（Cookie 注入与账号密码登录两条通道的汇合点）"""
+
+    def _stage(self):
+        return daily._Stage("测试")
+
+    def test_重定向到登录页立即判定cookie失效(self):
+        """未登录时 /daily_checkin 会 302 到 /login：必须先判 URL，不白等 DOM 超时"""
+        driver = FakeDriver('<html><title>登录</title><body>登录</body></html>',
+                            landing="https://linux.sb/login")
+        with self.assertRaises(daily.CookieExpired):
+            daily._checkin_in_browser(driver, self._stage())
+        # 没有进入等待 DOM 的环节（否则要空等满超时且异常类型退化）
+        self.assertEqual(driver.dom_queries, [])
+
+    def test_已签到时不再发签到请求(self):
+        driver = FakeDriver(BROWSER_PAGE_CHECKED)
+        lines, username = daily._checkin_in_browser(driver, self._stage())
+        self.assertIn("今日已签到", lines[0])
+        self.assertEqual(driver.async_scripts, [])
+        self.assertEqual(username, "烧饼爱好者")
+
+    def test_用浏览器现场的bbs_csrf签到并提取概览(self):
+        driver = FakeDriver(
+            BROWSER_PAGE_UNCHECKED,
+            cookies=[{"name": "bbs_auth", "value": "abc"},
+                     {"name": "bbs_csrf", "value": "livecsrf"}],
+            script_result={"ok": 1, "message": "签到成功", "bonus": 76},
+        )
+        lines, username = daily._checkin_in_browser(driver, self._stage())
+        # 提交的 _csrf 取自浏览器当前 cookie，保证与请求携带的 cookie 一致
+        self.assertEqual(driver.async_scripts[0][0], "livecsrf")
+        self.assertIn("签到成功", lines[0])
+        self.assertIn("本次签到获得: 76 积分", lines)
+        self.assertIn("当前积分: 888", lines)
+        self.assertEqual(username, "烧饼爱好者")
+        self.assertEqual(driver.refreshed, 1)
+
+    def test_bbs_csrf被服务端删除时回退备用令牌(self):
+        driver = FakeDriver(
+            BROWSER_PAGE_UNCHECKED,
+            cookies=[{"name": "bbs_csrf", "value": "deleted"}],
+            script_result={"ok": 1, "message": ""},
+        )
+        daily._checkin_in_browser(driver, self._stage(), fallback_csrf="backup")
+        self.assertEqual(driver.async_scripts[0][0], "backup")
+
+    def test_取不到csrf且无备用令牌时判定cookie失效(self):
+        driver = FakeDriver(BROWSER_PAGE_UNCHECKED, cookies=[],
+                            script_result={"ok": 1})
+        with self.assertRaises(daily.CookieExpired):
+            daily._checkin_in_browser(driver, self._stage())
+        self.assertEqual(driver.async_scripts, [])
+
+    def test_服务端拒绝抛CheckinRejected(self):
+        driver = FakeDriver(
+            BROWSER_PAGE_UNCHECKED,
+            cookies=[{"name": "bbs_csrf", "value": "live"}],
+            script_result={"ok": 0, "message": "请求已过期"},
+        )
+        with self.assertRaisesRegex(daily.CheckinRejected, "请求已过期"):
+            daily._checkin_in_browser(driver, self._stage())
+
+    def test_重复签到按已签到处理(self):
+        driver = FakeDriver(
+            BROWSER_PAGE_UNCHECKED,
+            cookies=[{"name": "bbs_csrf", "value": "live"}],
+            script_result={"ok": 0, "message": "今日已打卡，请明天再来"},
+        )
+        lines, _ = daily._checkin_in_browser(driver, self._stage())
+        self.assertIn("今日已签到", lines[0])
+
+
+    def test_页面形态对不上仍完成签到(self):
+        """模板改版导致就绪选择器落空时只警告不失败——签到由 fetch 完成，不依赖元素"""
+        driver = FakeDriver(
+            '<html><body><div class="brand-new-layout">签到</div></body></html>',
+            cookies=[{"name": "bbs_csrf", "value": "live"}],
+            script_result={"ok": 1, "message": "签到成功"},
+        )
+        # 把就绪等待上限压到 0.2 秒，避免单测真等满 20 秒
+        with mock.patch.object(daily, "CHECKIN_PAGE_READY_TIMEOUT", 0.2):
+            lines, _ = daily._checkin_in_browser(driver, self._stage())
+        self.assertIn("签到成功", lines[0])
+        self.assertEqual(driver.async_scripts[0][0], "live")
+
+    def test_登录表单缺失时硬失败(self):
+        """required=True 的元素（登录表单）拿不到必须抛异常，否则后续操作无从下手"""
+        driver = FakeDriver('<html><body>空页面</body></html>')
+        with mock.patch.object(daily.time, "sleep"):
+            with self.assertRaisesRegex(RuntimeError, r"\[name=username\]"):
+                daily.wait_dom_ready(driver, "[name=username]", timeout=1)
 
 
 class RunTestCase(unittest.TestCase):

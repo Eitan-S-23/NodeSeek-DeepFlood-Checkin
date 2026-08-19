@@ -1,6 +1,6 @@
 # NodeSeek 自动签到评论加鸡腿脚本
 
-这是一个用于 NodeSeek 及同站体系（DeepFlood）、并附带 linux.sb（烧饼社区）站的每日自动签到脚本。NodeSeek / DeepFlood 使用 Selenium 和 undetected-chromedriver 实现自动化操作，linux.sb 无 Cloudflare 防护，用纯 requests 签到（`linuxsb_daily.py`）。三站可顺序执行、一站失败不影响其他站。
+这是一个用于 NodeSeek 及同站体系（DeepFlood）、并附带 linux.sb（烧饼社区）站的每日自动签到脚本。三站均使用 Selenium 和 undetected-chromedriver 应对 Cloudflare 防护；linux.sb 额外保留一条 requests 快速通道（`linuxsb_daily.py`），站点未开挑战时直接用它签到。三站可顺序执行、一站失败不影响其他站。
 
 强烈建议修改随机词。否则容易被举报被禁言。有能力的可以fork后自己定义改。
 
@@ -25,18 +25,18 @@
 - `HEADLESS`: 是否使用无头模式，true/false（可选，默认 true）。**注意 GitHub Actions 中需用有头模式（`false`）配合 xvfb 才能通过 Cloudflare 挑战**，workflow 已硬编码为 `false`，本地无显示环境时可用 `true`
 - `NS_EXTRA_TASKS`: 除签到外的任务（评论、加鸡腿）总开关，true/false（可选，**默认 false**）
 - `DEEPFLOOD_COOKIE`: DeepFlood 子站的 Cookie（可选）。配置后会自动追加签到第二站；两站用同一套代码、同样页面结构，仅域名与 cookie 不同
-- `LINUXSB_COOKIE`: linux.sb（烧饼社区）的 Cookie（可选）。配置后会在 NodeSeek / DeepFlood 之后追加签到一站；该站无 Cloudflare 防护，用纯 requests 签到（`linuxsb_daily.py`）。多账号用 `&` 分隔（`cookie1&cookie2`），依次签到、单账号失败不中断
-- `LINUXSB_ACCOUNT`: linux.sb 的账号密码兜底登录（可选），格式为 JSON：`{"username":"你的用户名","password":"你的密码"}`。**Cookie 优先**：`LINUXSB_COOKIE` 有效时完全不用凭据；cookie 缺失或失效时自动用纯 requests 复刻登录链路（算术题本地解 + PoW 本地求 nonce，对照站点 plugins.js 反推），登录成功当场继续签到，无需浏览器、无需手动换 cookie
+- `LINUXSB_COOKIE`: linux.sb（烧饼社区）的 Cookie（可选）。配置后会在 NodeSeek / DeepFlood 之后追加签到一站（`linuxsb_daily.py`）。该站 2026-08 起启用了 Cloudflare 托管挑战，脚本会先用 requests 探测：能直连就走 requests 快通道，被挑战（HTTP 403 + `Cf-Mitigated: challenge`）则自动把 Cookie 注入浏览器过盾后签到。多账号用 `&` 分隔（`cookie1&cookie2`），依次签到、单账号失败不中断
+- `LINUXSB_ACCOUNT`: linux.sb 的账号密码兜底登录（可选），格式为 JSON：`{"username":"你的用户名","password":"你的密码"}`。**Cookie 优先**：`LINUXSB_COOKIE` 有效时完全不用凭据；Cookie 缺失或失效时自动用浏览器登录（算术题验证码由脚本解出填写，PoW 由页面 JS 计算），登录成功当场在同一浏览器会话内继续签到，无需手动换 cookie
 - `SITE_GAP_MIN` / `SITE_GAP_MAX`: 各站签到之间的随机延迟范围（秒，可选，默认 60-180），降低连续签到被风控的概率
 
 布尔类型变量接受 `true`/`1`/`yes`/`on`/`y`（大小写不敏感）为真，其余值一律为假。
 
 ### 关于多站点签到
 
-DeepFlood 是 NodeSeek 的子站，同一套论坛代码、同样的页面结构，只是独立域名与独立登录态。linux.sb（烧饼社区）则是独立的 NodeBB 类论坛，无 Cloudflare 防护。各站配置情况：
+DeepFlood 是 NodeSeek 的子站，同一套论坛代码、同样的页面结构，只是独立域名与独立登录态。linux.sb（烧饼社区）则是另一套论坛程序（bbs1），同样挂在 Cloudflare 后面。各站配置情况：
 
 - 配置 `DEEPFLOOD_COOKIE`：NodeSeek 与 DeepFlood 共用同一个浏览器实例，各自注入自己的 cookie 后签到，互不干扰
-- 配置 `LINUXSB_COOKIE`：NodeSeek / DeepFlood 完成后，workflow 追加执行 `linuxsb_daily.py` 完成第三站签到（纯 requests，无需浏览器）
+- 配置 `LINUXSB_COOKIE`：NodeSeek / DeepFlood 完成后，workflow 追加执行 `linuxsb_daily.py` 完成第三站签到。requests 通道被 Cloudflare 挑战时自动改用浏览器（因此该步骤同样以 `xvfb-run` + `HEADLESS=false` 运行）
 - 无论配置几站，站与站之间都会随机等待 `SITE_GAP_MIN`~`SITE_GAP_MAX` 秒，避免两次签到紧挨着被判定为机器批量行为
 - 通知按站点分段显示，各自带自己的签到结果
 
