@@ -11,13 +11,14 @@ linux.sb（烧饼社区）每日自动签到脚本。
    - GET  /daily_checkin 携带 Cookie，从 HTML 取 <input name="_csrf"> 与
      「今日已签到」状态
    - POST /daily_checkin 携带 Cookie 与表单 _csrf，响应 {"ok":1,...} 为成功
-2. 浏览器通道（过 Cloudflare 用）。2026-08 起 linux.sb 全站启用了 Cloudflare
-   托管挑战：requests 通道会收到 HTTP 403 + Cf-Mitigated: challenge +
-   「Just a moment...」挑战页。挑战要求执行页面 JS，纯 HTTP 客户端一律被拒
-   （实测 requests 与 curl_cffi 的 chrome/edge/firefox 指纹伪装全部 403，
-   与出口 IP、请求头是否完整无关），因此只能由真实浏览器放行。策略与
-   nodeseek_daily.py 同源：undetected-chromedriver 有头模式 + xvfb 虚拟显示，
-   等挑战自动通过后注入 Cookie，在同一浏览器会话内用页面 fetch 完成签到。
+2. 浏览器通道（过 Cloudflare 用）。2026-08 起 linux.sb 会间歇性开启 Cloudflare
+   托管挑战：命中时 requests 通道收到 HTTP 403 + Cf-Mitigated: challenge +
+   「Just a moment...」挑战页。挑战不是常开的（实测同一出口 IP 相隔约两小时
+   一次 403、一次 200），但一旦命中，纯 HTTP 客户端无解——requests 与
+   curl_cffi 的 chrome/edge/firefox 指纹伪装全部 403，与出口 IP、请求头是否
+   完整无关，只能由真实浏览器放行。策略与 nodeseek_daily.py 同源：
+   undetected-chromedriver 有头模式 + xvfb 虚拟显示，等挑战自动通过后注入
+   Cookie，在同一浏览器会话内用页面 fetch 完成签到。
 
 环境变量：
 - LINUXSB_COOKIE：登录 Cookie；多账号用 & 分隔，依次签到、单账号失败不中断。
@@ -27,6 +28,8 @@ linux.sb（烧饼社区）每日自动签到脚本。
   用浏览器自动登录（算术题验证码自动解析，PoW 由页面自身 JS 完成）
 - SITE_GAP_MIN / SITE_GAP_MAX：签到前随机延迟范围（秒，默认 60-180），
   与 nodeseek_daily.py 的站间延迟共用同一对变量，降低被风控判为批量行为的概率
+- LINUXSB_FORCE_BROWSER：置 1 时跳过 requests 探测直接走浏览器通道。用于站点
+  长期开盾时省掉必然失败的探测，或在挑战未触发的时段验证浏览器通道
 - 通知渠道配置见 notify.py（TG_BOT_TOKEN、WECOM_WEBHOOK 等，全部可选）
 """
 import json
@@ -474,8 +477,8 @@ def browser_sign_in_with_cookie(cookie):
     """
     Cookie 注入浏览器并就地签到，返回 (成功与否, 结果摘要, 用户名或 None)。
 
-    这是站点启用 Cloudflare 托管挑战后 Cookie 通道的唯一可行路径：挑战要求执行
-    页面 JS，requests / curl_cffi 一律 403，只有真实浏览器能放行。流程与
+    这是挑战命中时 Cookie 通道的唯一可行路径：挑战要求执行页面 JS，
+    requests / curl_cffi 均被 403，只有真实浏览器能放行。流程与
     nodeseek_daily.py 的 inject_site_cookies 同源——先访问首页让 UCD 过挑战、
     拿到本机可用的 cf_clearance，再注入登录 cookie，最后打开签到页签到。
 
@@ -989,11 +992,17 @@ def run():
     3. 浏览器账号密码通道：Cookie 本身已失效时，用 LINUXSB_ACCOUNT 兜底登录
        （最多补一次，多账号同时失效时只救第一个）
 
+    置 LINUXSB_FORCE_BROWSER=1 可跳过 requests 探测直接走通道 2。
+
     单个账号失败不中断其余账号。通知格式对齐 nodeseek_daily：每个账号一段，
     段首带「签到时间」与概览行。
     """
     raw_cookies = os.getenv("LINUXSB_COOKIE", "").strip()
     creds = load_account_creds()
+    # 挑战是间歇性的：同一出口 IP 可能上一轮 403、下一轮 200。没有这个开关，
+    # 浏览器通道就只能守着站点开盾的时间窗口才验证得到；站点长期开盾时也可用它
+    # 省掉每次必然失败的 requests 探测。
+    force_browser = os.getenv("LINUXSB_FORCE_BROWSER", "") == "1"
     if not raw_cookies and not creds:
         # 与 DEEPFLOOD_COOKIE 一致：未配置即视为未启用该站，静默跳过、不算失败
         print("[linux.sb] 未配置 LINUXSB_COOKIE 且未配置 LINUXSB_ACCOUNT，跳过 linux.sb 签到")
@@ -1006,6 +1015,8 @@ def run():
 
     cookie_list = raw_cookies.split("&") if raw_cookies else [None]
     print(f"[linux.sb] 共 {len(cookie_list)} 个账号开始签到（Cookie 优先，必要时账号密码兜底）")
+    if force_browser:
+        print("[linux.sb] LINUXSB_FORCE_BROWSER=1，跳过 requests 探测直接走浏览器通道")
 
     results = []
     sections = []
@@ -1020,8 +1031,10 @@ def run():
             # 探测与 requests 签到放在同一个 try 内：挑战可能在探测通过之后才
             # 生效（站点中途开盾），两处命中都要走同一条浏览器兜底路径。
             result = None  # requests 通道已出结果时为 (成功, 摘要, 用户名)
-            cf_blocked = False
-            if cookie:
+            # 与 bool(cookie) 相与：无 Cookie 账号本就该直接走账号密码通道，
+            # 强制开关不能把 None 送进浏览器 Cookie 通道
+            cf_blocked = force_browser and bool(cookie)
+            if cookie and not force_browser:
                 try:
                     csrf, _checked_in, is_login = fetch_checkin_state(cookie)
                     if csrf is not None and not is_login:

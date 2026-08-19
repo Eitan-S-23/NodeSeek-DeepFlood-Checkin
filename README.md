@@ -25,8 +25,9 @@
 - `HEADLESS`: 是否使用无头模式，true/false（可选，默认 true）。**注意 GitHub Actions 中需用有头模式（`false`）配合 xvfb 才能通过 Cloudflare 挑战**，workflow 已硬编码为 `false`，本地无显示环境时可用 `true`
 - `NS_EXTRA_TASKS`: 除签到外的任务（评论、加鸡腿）总开关，true/false（可选，**默认 false**）
 - `DEEPFLOOD_COOKIE`: DeepFlood 子站的 Cookie（可选）。配置后会自动追加签到第二站；两站用同一套代码、同样页面结构，仅域名与 cookie 不同
-- `LINUXSB_COOKIE`: linux.sb（烧饼社区）的 Cookie（可选）。配置后会在 NodeSeek / DeepFlood 之后追加签到一站（`linuxsb_daily.py`）。该站 2026-08 起启用了 Cloudflare 托管挑战，脚本会先用 requests 探测：能直连就走 requests 快通道，被挑战（HTTP 403 + `Cf-Mitigated: challenge`）则自动把 Cookie 注入浏览器过盾后签到。多账号用 `&` 分隔（`cookie1&cookie2`），依次签到、单账号失败不中断
+- `LINUXSB_COOKIE`: linux.sb（烧饼社区）的 Cookie（可选）。配置后会在 NodeSeek / DeepFlood 之后追加签到一站（`linuxsb_daily.py`）。该站 2026-08 起会**间歇性**开启 Cloudflare 托管挑战（同一出口 IP 可能上一轮 403、下一轮 200），脚本会先用 requests 探测：能直连就走 requests 快通道，被挑战（HTTP 403 + `Cf-Mitigated: challenge`）则自动把 Cookie 注入浏览器过盾后签到。多账号用 `&` 分隔（`cookie1&cookie2`），依次签到、单账号失败不中断
 - `LINUXSB_ACCOUNT`: linux.sb 的账号密码兜底登录（可选），格式为 JSON：`{"username":"你的用户名","password":"你的密码"}`。**Cookie 优先**：`LINUXSB_COOKIE` 有效时完全不用凭据；Cookie 缺失或失效时自动用浏览器登录（算术题验证码由脚本解出填写，PoW 由页面 JS 计算），登录成功当场在同一浏览器会话内继续签到，无需手动换 cookie
+- `LINUXSB_FORCE_BROWSER`: 置 `1` 时 linux.sb 跳过 requests 探测直接走浏览器通道（可选）。用于站点长期开盾时省掉必然失败的探测，或在挑战未触发的时段验证浏览器通道
 - `SITE_GAP_MIN` / `SITE_GAP_MAX`: 各站签到之间的随机延迟范围（秒，可选，默认 60-180），降低连续签到被风控的概率
 
 布尔类型变量接受 `true`/`1`/`yes`/`on`/`y`（大小写不敏感）为真，其余值一律为假。

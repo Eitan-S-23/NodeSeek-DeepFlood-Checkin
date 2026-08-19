@@ -549,7 +549,7 @@ class RunCloudflareFallbackTestCase(unittest.TestCase):
         self.addCleanup(mock.patch.stopall)
 
     def tearDown(self):
-        for name in ("LINUXSB_COOKIE", "LINUXSB_ACCOUNT"):
+        for name in ("LINUXSB_COOKIE", "LINUXSB_ACCOUNT", "LINUXSB_FORCE_BROWSER"):
             os.environ.pop(name, None)
 
     def test_挑战时改用浏览器注入cookie签到(self):
@@ -665,6 +665,57 @@ class RunCloudflareFallbackTestCase(unittest.TestCase):
         self.assertIn("账号 1", content)
         self.assertIn("账号 2", content)
         self.assertIn("浏览器起不来", content)
+
+    def test_强制开关跳过requests探测直接走浏览器(self):
+        """LINUXSB_FORCE_BROWSER=1：站点未开盾时也直接走浏览器通道，一个请求都不发"""
+        os.environ["LINUXSB_COOKIE"] = "bbs_auth=abc"
+        os.environ["LINUXSB_FORCE_BROWSER"] = "1"
+        with mock.patch.object(daily.requests, "get") as get_mock, \
+             mock.patch.object(daily.requests, "post") as post_mock, \
+             mock.patch.object(daily, "browser_cookie_sign_in_with_retry",
+                               return_value=(True, "签到结果: 签到成功（浏览器）",
+                                             "小明")) as cookie_mock, \
+             mock.patch.object(daily.notify, "send") as send_mock:
+            code = daily.run()
+
+        self.assertEqual(code, 0)
+        cookie_mock.assert_called_once_with("bbs_auth=abc")
+        # 强制模式下连探测都不该发出
+        get_mock.assert_not_called()
+        post_mock.assert_not_called()
+        self.assertIn("小明", send_mock.call_args.args[1])
+
+    def test_强制开关不把无cookie账号送进cookie通道(self):
+        """只配了凭据时，强制开关必须让账号走账号密码通道，而非注入 None"""
+        os.environ["LINUXSB_ACCOUNT"] = '{"username": "u", "password": "p"}'
+        os.environ["LINUXSB_FORCE_BROWSER"] = "1"
+        with mock.patch.object(daily, "browser_cookie_sign_in_with_retry"
+                               ) as cookie_mock, \
+             mock.patch.object(daily, "browser_sign_in_with_retry",
+                               return_value=(True, "签到结果: 签到成功", "小明")
+                               ) as login_mock, \
+             mock.patch.object(daily.notify, "send") as send_mock:
+            code = daily.run()
+
+        self.assertEqual(code, 0)
+        cookie_mock.assert_not_called()
+        login_mock.assert_called_once()
+        self.assertIn("小明", send_mock.call_args.args[1])
+
+    def test_未设置强制开关时仍优先requests快通道(self):
+        """开关默认关闭：站点未开盾时保持 requests 通道，不无谓启动浏览器"""
+        os.environ["LINUXSB_COOKIE"] = "bbs_auth=abc"
+        with fake_get(PAGE_UNCHECKED), \
+             fake_post({"ok": 1, "message": "签到成功"}) as post_mock, \
+             mock.patch.object(daily, "browser_cookie_sign_in_with_retry"
+                               ) as cookie_mock, \
+             mock.patch.object(daily.notify, "send") as send_mock:
+            code = daily.run()
+
+        self.assertEqual(code, 0)
+        self.assertEqual(post_mock.call_count, 1)
+        cookie_mock.assert_not_called()
+        self.assertIn("签到成功", send_mock.call_args.args[1])
 
 
 class FakeDriver:
